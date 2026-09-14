@@ -1,0 +1,3142 @@
+/* SeatingPlanner — Select Event modal wiring.
+ *
+ * The EventPicker pattern owns everything INSIDE the dialog: predictive search, the
+ * "Live events only" filter, row selection, clear-search, and Escape. It deliberately owns
+ * none of the hosting, and says so — "Emits CustomEvents so the host app owns persistence
+ * and routing". This file is that host.
+ *
+ * So the whole job here is four things:
+ *   1. open the overlay from the "Select Event" button
+ *   2. close it on `event-picker:close` (the × and Cancel), a backdrop click, or Escape
+ *   3. close it on `event-picker:select`, and hand the chosen event on
+ *   4. manage focus, because Modal.css only toggles `display`
+ *
+ * WHY THE FOCUS CODE EXISTS. `.modal-overlay` flips display:none → flex and nothing else.
+ * The dialog is marked `aria-modal="true"`, which is a promise to the user that focus is
+ * inside it and cannot wander out — a promise CSS cannot keep on its own. Without this,
+ * opening the picker leaves focus on the button behind the scrim, and Tab walks the whole
+ * page underneath. Escape also silently stops working, because EventPicker listens for it
+ * on its own root: no focus inside the picker, no keydown, no close.
+ *
+ * Guarded so including the script twice does not double-bind.
+ */
+(function () {
+  'use strict';
+
+  if (window.__seatingPlannerReady) return;
+  window.__seatingPlannerReady = true;
+
+  var OPEN_CLASS = 'modal-overlay--open';
+  var FOCUSABLE = [
+    'a[href]', 'button:not([disabled])', 'input:not([disabled])',
+    'select:not([disabled])', 'textarea:not([disabled])', '[tabindex]:not([tabindex="-1"])'
+  ].join(',');
+
+  var overlay = document.querySelector('[data-seating-picker]');
+
+  /* querySelectorAll, not querySelector (2026-09-11). There is more than one way into this
+   * dialog and only the first was ever bound: the No Event gate's "Select Event" button worked,
+   * while the "Switch event" control in the header — which is the one you reach once an event
+   * IS chosen, so the one most used — did nothing at all. A singular lookup silently binds the
+   * first match and gives no sign the others exist. */
+  var triggers = document.querySelectorAll('[data-seating-select-event]');
+  if (!overlay || !triggers.length) return;
+
+  /* Which trigger opened it, so focus returns to the control the user actually pressed rather
+   * than to whichever one happens to be first in the document. Seeded so `close()` always has
+   * somewhere to go even if it is ever called before an open. */
+  var trigger = triggers[0];
+
+  var dialog = overlay.querySelector('[role="dialog"]');
+  var returnFocusTo = null;
+
+  /* ── Screen state ─────────────────────────────────────────────────────────
+   * The screen has mutually-exclusive states, each a Figma frame of its own:
+   *
+   *   no-event   the event gate            3515:175956 / 3515:213358
+   *   no-plan    event chosen, no plans    3515:176082 / 3515:213400
+   *
+   * Both states' markup is in the page and one is shown at a time. `hidden` rather than a
+   * CSS class, because base.css guarantees `hidden` always wins, and a display:none child
+   * is removed from flex layout entirely — so the page's gap never appears around a state
+   * that is not on screen.
+   *
+   * Choosing an event genuinely advances no-event -> no-plan (designer, 2026-08-26), which
+   * makes the demo a working flow rather than a set of stills. `?state=no-plan` lands on one
+   * directly for review, the same trick `?frame=mobile` uses elsewhere. */
+  var page = document.querySelector('[data-seating-state]');
+  var panels = document.querySelectorAll('[data-seating-panel]');
+
+  function setState(state) {
+    if (!page) return;
+    page.setAttribute('data-seating-state', state);
+    Array.prototype.forEach.call(panels, function (panel) {
+      panel.hidden = panel.getAttribute('data-seating-panel') !== state;
+    });
+  }
+
+  /* The create-plan modal lives in its own IIFE and cannot see `setState` — calling it directly
+   * from there threw a ReferenceError, so a successful submit closed the modal and then silently
+   * failed to advance (found 2026-08-27 by reading the minified build, where the undeclared global
+   * was obvious). It already announces itself, so the state machine listens instead: the modal
+   * reports what happened, this owns what the page shows. */
+  document.addEventListener('seating-planner:plan-created', function () {
+    setState('plan');
+  });
+
+  /* ...and the way back. Deleting the last plan returns the screen to "No seating plans yet"
+   * (designer, 2026-09-14) rather than leaving the plan state up with an empty header.
+   *
+   * `seating-app.js` owns the model and announces this once the list is actually empty, for the
+   * same reason the create path works this way: the modal and the model report what happened,
+   * this owns what the page shows. Listening for the DELETE event instead would mean counting the
+   * survivors from here and racing whoever removes them.
+   *
+   * Deliberately NOT `no-event`: the event is still chosen. `no-plan` is the state that already
+   * exists for "this event has no plans", which is exactly where deleting the last one lands you
+   * — so this reuses a frame (`3515:176082`) rather than inventing a state. */
+  document.addEventListener('seating-planner:plans-empty', function () {
+    setState('no-plan');
+  });
+
+  var requested = /[?&]state=([a-z-]+)/.exec(window.location.search);
+  if (requested) {
+    var want = requested[1];
+    /* `create-plan` and `create-plan-errors` are MODAL states, not page states — they sit
+     * over the no-plan screen. Without this they would match no panel and hide all of them,
+     * leaving an empty page behind the modal. */
+    if (want.indexOf('create-plan') === 0) want = 'no-plan';
+    /* States that exist: no-event · no-plan · plan (+ create-plan* as modals over no-plan). */
+    if (document.querySelector('[data-seating-panel="' + want + '"]')) setState(want);
+  }
+
+  function isOpen() {
+    return overlay.classList.contains(OPEN_CLASS);
+  }
+
+  /* Visible focusables only — EventPicker hides non-matching rows with the `hidden`
+   * attribute while searching, and a hidden row must not be a tab stop. offsetParent is
+   * null for anything display:none'd or hidden, which covers both. */
+  function focusable() {
+    return Array.prototype.filter.call(
+      dialog.querySelectorAll(FOCUSABLE),
+      function (el) { return el.offsetParent !== null; }
+    );
+  }
+
+  function open() {
+    if (isOpen()) return;
+    returnFocusTo = document.activeElement;
+    overlay.classList.add(OPEN_CLASS);
+    setExpanded('true');
+
+    /* The search field, not the first focusable. Typing is what you came to do, and it is
+     * also inside the picker root, so EventPicker's own Escape handler starts working
+     * immediately. Falls back to the dialog itself if the field ever goes away. */
+    var search = dialog.querySelector('[data-ep-search]') || dialog;
+    if (search === dialog && !dialog.hasAttribute('tabindex')) dialog.setAttribute('tabindex', '-1');
+    search.focus();
+  }
+
+  function close() {
+    if (!isOpen()) return;
+    overlay.classList.remove(OPEN_CLASS);
+    setExpanded('false');
+
+    /* Back where they came from, falling back to the trigger.
+     *
+     * `<body>` is explicitly rejected, not just null/detached. It is a real, connected
+     * element, so an isConnected check alone happily "restores" focus to it — which is the
+     * same as losing focus, and sends the next Tab to the top of the page. That is exactly
+     * what happens whenever the dialog was opened without the trigger being focused first
+     * (a programmatic .click(), or any browser that does not focus a button on click). */
+    var target = (returnFocusTo && returnFocusTo !== document.body && returnFocusTo.isConnected)
+      ? returnFocusTo
+      : trigger;
+    returnFocusTo = null;
+    target.focus();
+  }
+
+  /* Every trigger states the dialog's state, not just the one that opened it: they all control
+   * the same dialog, so a screen reader landing on the other one must not be told it is closed. */
+  function setExpanded(value) {
+    Array.prototype.forEach.call(triggers, function (btn) {
+      btn.setAttribute('aria-expanded', value);
+    });
+  }
+
+  Array.prototype.forEach.call(triggers, function (btn) {
+    btn.addEventListener('click', function () {
+      trigger = btn;        /* the focus-return target for THIS open */
+      open();
+    });
+  });
+
+  /* Both bubble from the picker root. */
+  overlay.addEventListener('event-picker:close', close);
+
+  overlay.addEventListener('event-picker:select', function (event) {
+    var chosen = event.detail || {};
+    close();
+
+    /* An event now has somewhere to go: the No Plan state. This is the seam screen 2 left
+     * behind, wired up. */
+    setState('no-plan');
+
+    /* TODO(backend:SeatingPlanner): the chosen event's name/date/venue should populate the
+     * SeatingHeader rather than the hardcoded copy in it, and the choice should persist per
+     * user so a reload returns to it — see seating-last-used-event. Which state renders is
+     * really the plan COUNT, not the click: an event with plans goes straight to the
+     * planner, not to No Plan. That is why the event is still re-emitted for a host to act
+     * on rather than being treated as settled here. */
+    overlay.dispatchEvent(new CustomEvent('seating-planner:event-chosen', {
+      bubbles: true,
+      detail: { id: chosen.id || '', name: chosen.name || '' }
+    }));
+  });
+
+  /* Backdrop. Only a click on the overlay ITSELF — a click that merely bubbles up from
+   * inside the dialog must not dismiss it. */
+  overlay.addEventListener('click', function (event) {
+    if (event.target === overlay) close();
+  });
+
+  /* Escape and the focus trap.
+   *
+   * EventPicker already closes on Escape, but only while focus is inside its root. This
+   * catches the case where focus is on the overlay or has otherwise left the picker, so the
+   * key works wherever you are. close() is idempotent, so both firing is harmless. */
+  overlay.addEventListener('keydown', function (event) {
+    if (!isOpen()) return;
+
+    if (event.key === 'Escape') {
+      event.stopPropagation();
+      close();
+      return;
+    }
+
+    if (event.key !== 'Tab') return;
+
+    var items = focusable();
+    if (!items.length) return;
+
+    var first = items[0];
+    var last = items[items.length - 1];
+    var active = document.activeElement;
+
+    /* Wrap at both ends, and pull focus back in if it has escaped the dialog entirely. */
+    if (event.shiftKey && (active === first || !dialog.contains(active))) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && (active === last || !dialog.contains(active))) {
+      event.preventDefault();
+      first.focus();
+    }
+  });
+})();
+
+/* ── Create Plan modal ──────────────────────────────────────────────────────
+ * Figma 3515:212885 / 3515:228092 (help off) and 3515:212593 / 3515:212739 (help on +
+ * errors). Opened by the SeatingHeader's own New Plan button.
+ *
+ * Deliberately a separate block from the picker above rather than a shared helper. The two
+ * modals differ in what focus should land on (a search field vs the first form field) and in
+ * what closing means (a picker just closes; a form may be mid-edit), and the picker's
+ * behaviour is largely delegated to event-picker.js. A shared abstraction over two
+ * genuinely different dialogs would hide more than it saved — but the ARIA contract is
+ * identical, so the same rules apply: focus moves in on open, returns on close, and Tab is
+ * trapped while it is open.
+ */
+(function () {
+  'use strict';
+
+  if (window.__createPlanReady) return;
+  window.__createPlanReady = true;
+
+  var OPEN_CLASS = 'modal-overlay--open';
+  var FOCUSABLE = [
+    'a[href]', 'button:not([disabled])', 'input:not([disabled])',
+    'select:not([disabled])', 'textarea:not([disabled])', '[tabindex]:not([tabindex="-1"])'
+  ].join(',');
+
+  var overlay = document.querySelector('[data-create-plan]');
+  /* THERE ARE TWO New Plan buttons — one in the no-plan header, one in the plan header — and
+   * `querySelector` returns only the first. So the listener bound to the no-plan button and the
+   * one actually on screen in the `?state=plan` view did nothing at all.
+   *
+   * Exactly the bug the Copy Plans pair already had, whose fix is delegated and whose comment
+   * says so: "there are two Copy Plans buttons in the header, one per section, and both were
+   * unwired". The same mistake, one element along, and it survived because the no-plan state is
+   * the one you land on by default — so the button appears to work until you have a plan.
+   *
+   * `triggers` for the guard, and `lastTrigger` for `aria-expanded` and focus return, which have
+   * to name the button the user actually pressed. */
+  var triggers = Array.prototype.slice.call(document.querySelectorAll('[data-seating-new-plan]'));
+  if (!overlay || !triggers.length) return;
+  var lastTrigger = triggers[0];
+
+  var dialog = overlay.querySelector('[role="dialog"]');
+  var form = overlay.querySelector('#create-plan-form');
+  var helpToggle = overlay.querySelector('#cp-help-toggle');
+  var returnFocusTo = null;
+
+  function isOpen() { return overlay.classList.contains(OPEN_CLASS); }
+
+  function focusable() {
+    return Array.prototype.filter.call(
+      dialog.querySelectorAll(FOCUSABLE),
+      function (el) { return el.offsetParent !== null; }
+    );
+  }
+
+  function field(name) { return overlay.querySelector('[data-cp-field="' + name + '"]'); }
+
+  function setError(name, message) {
+    var wrap = field(name);
+    if (!wrap) return;
+    var help = wrap.querySelector('[data-cp-help]');
+    wrap.classList.add('input--error');
+    if (help) {
+      help.textContent = message;
+      /* The message is an error, so announce it. `.input--error .input__help` is already
+       * red in Input.css — the same element serves as hint and error, which is exactly how
+       * Figma draws it. */
+      help.setAttribute('role', 'alert');
+    }
+    var control = wrap.querySelector('.input__control');
+    if (control) control.setAttribute('aria-invalid', 'true');
+  }
+
+  /* Restores whatever hint the markup shipped with — empty for the two fields whose help
+   * copy Figma never shows, which `.input__help:empty` then hides. */
+  function clearErrors() {
+    Array.prototype.forEach.call(overlay.querySelectorAll('[data-cp-field]'), function (wrap) {
+      wrap.classList.remove('input--error');
+      var help = wrap.querySelector('[data-cp-help]');
+      if (help) {
+        help.textContent = help.getAttribute('data-cp-help-original') || '';
+        help.removeAttribute('role');
+      }
+      var control = wrap.querySelector('.input__control');
+      if (control) control.removeAttribute('aria-invalid');
+    });
+  }
+
+  /* Stash the shipped hints once, so clearErrors can put them back. */
+  Array.prototype.forEach.call(overlay.querySelectorAll('[data-cp-help]'), function (help) {
+    help.setAttribute('data-cp-help-original', help.textContent.trim());
+  });
+
+  function open(from) {
+    if (isOpen()) return;
+    if (from) lastTrigger = from;
+    returnFocusTo = document.activeElement;
+    overlay.classList.add(OPEN_CLASS);
+    lastTrigger.setAttribute('aria-expanded', 'true');
+    var first = overlay.querySelector('.input__control');
+    if (first) first.focus();
+    else dialog.focus();
+  }
+
+  function close() {
+    if (!isOpen()) return;
+    overlay.classList.remove(OPEN_CLASS);
+    /* Cleared on BOTH, not just the last one: the state is opened directly by `?state=create-plan`
+     * as well, and a stale `aria-expanded="true"` on the other button would outlive the dialog. */
+    triggers.forEach(function (t) { t.setAttribute('aria-expanded', 'false'); });
+    /* Same `<body>` rejection as the picker — see the note there. */
+    var target = (returnFocusTo && returnFocusTo !== document.body && returnFocusTo.isConnected)
+      ? returnFocusTo
+      : lastTrigger;
+    returnFocusTo = null;
+    target.focus();
+  }
+
+  /* Delegated, so it does not matter which header is on screen or whether it was re-rendered. */
+  document.addEventListener('click', function (event) {
+    var btn = event.target.closest ? event.target.closest('[data-seating-new-plan]') : null;
+    if (!btn) return;
+    event.preventDefault();
+    open(btn);
+  });
+
+  Array.prototype.forEach.call(overlay.querySelectorAll('[data-cp-close]'), function (btn) {
+    btn.addEventListener('click', close);
+  });
+
+  overlay.addEventListener('click', function (event) {
+    if (event.target === overlay) close();
+  });
+
+  overlay.addEventListener('keydown', function (event) {
+    if (!isOpen()) return;
+
+    if (event.key === 'Escape') { close(); return; }
+    if (event.key !== 'Tab') return;
+
+    var items = focusable();
+    if (!items.length) return;
+    var first = items[0], last = items[items.length - 1], active = document.activeElement;
+
+    if (event.shiftKey && (active === first || !dialog.contains(active))) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && (active === last || !dialog.contains(active))) {
+      event.preventDefault();
+      first.focus();
+    }
+  });
+
+  /* "Show help" reveals each field's hint. The class does the work; the CSS deliberately
+   * leaves ERROR messages visible either way — an error you cannot see is worse than a hint
+   * you did not ask for, and Figma never draws help-off-with-errors to say otherwise. */
+  if (helpToggle) {
+    helpToggle.addEventListener('toggle:change', function (event) {
+      form.classList.toggle('create-plan__form--help', !!(event.detail && event.detail.active));
+    });
+  }
+
+  /* Validation uses the two rules Figma's own error copy states, verbatim:
+   *   "Plan name is required"
+   *   "Seats per table must be between 6 and 12."
+   * Nothing is invented — those strings ARE the spec, and transcribing them is why this is
+   * wired rather than faked with a demo state. Tables shows a hint reading "Number of tables
+   * is required." but Figma renders it grey, as help rather than an error, so it is not
+   * validated here. Worth a designer check: that copy reads like validation. */
+  if (form) {
+    form.addEventListener('submit', function (event) {
+      event.preventDefault();
+      clearErrors();
+
+      var name = overlay.querySelector('#cp-name');
+      var room = overlay.querySelector('#cp-room');
+      var tables = overlay.querySelector('#cp-tables');
+      var seats = overlay.querySelector('#cp-seats');
+      var bad = null;
+
+      if (name && !name.value.trim()) {
+        setError('name', 'Plan name is required');
+        bad = bad || name;
+      }
+
+      /* Room / location became required 2026-08-27. Figma gives it only a hint ("The room or
+       * area this plan covers"), never an error, so this message follows the wording of the
+       * one required-field error Figma DOES state — "Plan name is required". Derived from the
+       * established pattern rather than lifted from a frame; flagged in figma-notes. */
+      if (room && !room.value.trim()) {
+        setError('room', 'Room / location is required');
+        bad = bad || room;
+      }
+
+      /* Tables: required, and its own help line already says so in Figma's words.
+       *
+       * Upper bound added 2026-08-27 with the `max="99"` cap. The stepper's + button disables at
+       * 99 so clicking cannot exceed it, but the field is still a real number input — typing 150
+       * or pasting it would otherwise submit. Figma states no tables bound at all, so this message
+       * follows the wording of the one bounded-field error it DOES state ("Seats per table must be
+       * between 6 and 12."). Derived from the established pattern, not lifted from a frame — same
+       * footing as the Room message above, and flagged in figma-notes. */
+      if (tables) {
+        var t = Number(tables.value);
+        if (!tables.value.trim() || !Number.isFinite(t) || t < 1) {
+          setError('tables', 'Number of tables is required.');
+          bad = bad || tables;
+        } else if (t > 99) {
+          setError('tables', 'Number of tables must be between 1 and 99.');
+          bad = bad || tables;
+        }
+      }
+
+      /* Seats: required AND bounded. Both messages are Figma's own copy. The bounds match
+       * the input's min/max, so the native spinner cannot reach an invalid value either. */
+      if (seats) {
+        var n = Number(seats.value);
+        if (!seats.value.trim()) {
+          setError('seats', 'Seats per table must be between 6 and 12.');
+          bad = bad || seats;
+        } else if (!Number.isFinite(n) || n < 6 || n > 12) {
+          setError('seats', 'Seats per table must be between 6 and 12.');
+          bad = bad || seats;
+        }
+      }
+
+      if (bad) { bad.focus(); return; }
+
+      close();
+
+      /* The screen that follows IS now designed (3515:177748 / 3515:213426), so the flow continues
+       * into it. The transition is driven by the event below rather than a direct call: `setState`
+       * belongs to another IIFE and is not in scope here.
+       *
+       * TODO(backend:SeatingPlanner): creating a plan must generate its tables — see
+       * seating-new-plan. The plan screen's 12 tables and its seat rows are static markup;
+       * the real screen must render THIS plan's tables at the requested count and shape. */
+      overlay.dispatchEvent(new CustomEvent('seating-planner:plan-created', {
+        bubbles: true,
+        detail: {
+          name: (overlay.querySelector('#cp-name') || {}).value || '',
+          room: (overlay.querySelector('#cp-room') || {}).value || '',
+          tables: (overlay.querySelector('#cp-tables') || {}).value || '',
+          seats: (overlay.querySelector('#cp-seats') || {}).value || '',
+          /* Table Shape is a Select, so its value lives in the trigger's label rather than
+           * on an input. */
+          shape: (overlay.querySelector('#cp-shape .sel__value') ||
+                  overlay.querySelector('[data-cp-field="shape"] .sel__value') || {}).textContent || ''
+        }
+      }));
+    });
+  }
+
+  /* ?state=create-plan / create-plan-errors opens it directly for review; the errors form
+   * shows exactly the combination Figma's help-on frame draws. */
+  var q = window.location.search;
+  if (q.indexOf('state=create-plan') !== -1) {
+    open();
+    if (q.indexOf('create-plan-errors') !== -1) {
+      if (helpToggle) {
+        helpToggle.classList.add('toggle--active');
+        helpToggle.setAttribute('aria-checked', 'true');
+        form.classList.add('create-plan__form--help');
+      }
+      setError('name', 'Plan name is required');
+      setError('seats', 'Seats per table must be between 6 and 12.');
+    }
+  }
+})();
+
+
+/* ══ Plan selected: table selection, the mobile inline detail, and the resize handle ══════
+ *
+ * Figma  3515:177748  desktop, first table selected
+ *        3515:213426  mobile, nothing selected
+ *        3515:228026  mobile, tapped — the detail sits INSIDE the card grid, and the listing
+ *                     is at y=-79, i.e. scrolled so the selected card is at the top
+ *
+ * Selection lives here rather than in TableCard: the card's own figma-notes say the parent
+ * module owns it and toggles `--selected`, because only the parent knows which sibling to
+ * deselect and which detail panel to fill.
+ */
+(function () {
+  'use strict';
+
+  var plan = document.querySelector('[data-sp-plan]');
+  if (!plan) return;
+
+  var grid    = plan.querySelector('[data-sp-grid]');
+  var aside   = plan.querySelector('[data-sp-aside]');
+  var detail  = plan.querySelector('[data-sp-detail]');
+  var handle  = plan.querySelector('[data-sp-handle]');
+  var pool       = plan.querySelector('[data-sp-pool-region]');
+  var poolHandle = plan.querySelector('[data-sp-pool-handle]');
+  /* `nameEl`, `countEl` and a `cards` snapshot used to be captured here for the selection code
+   * that has moved to seating-app.js. The snapshot in particular is the thing not to reintroduce:
+   * `querySelectorAll` at load returns nodes the renderer later replaces, so it was a list of
+   * detached elements from the first repaint onwards, and `[data-sp-detail-count]` went the same
+   * way. Anything on this screen that needs a rendered node must look it up when it needs it. */
+
+  /* The CSS stacks this row at `@container cs-page (max-width: 1023px)`. JS cannot read a
+   * container query, and `matchMedia` would reintroduce the exact bug the CSS just fixed — a
+   * docked SidebarMenu leaves an 820px column at a 2239px viewport, where every viewport query
+   * says "desktop". So the threshold is measured off the page container, and a ResizeObserver
+   * watches it. STACK_MAX must stay in step with the CSS value. */
+  var STACK_MAX = 1023;
+  var pageEl = document.querySelector('.cc-control__page') || plan.parentNode;
+
+  function isStacked() {
+    return pageEl.getBoundingClientRect().width <= STACK_MAX;
+  }
+
+  /* ── Selection and the mobile inline detail are NOT here any more (2026-09-14) ────────
+   * `seating-app.js` owns them, because it owns the selection state and the render.
+   *
+   * What stood here: `selected`, `placeDetail()`, `select()`, a grid click listener, an
+   * `applyDefault()` holding the desktop-pre-selects / mobile-selects-nothing rule, and a
+   * ResizeObserver to re-apply it on every breakpoint crossing. All of it worked against
+   * `cards` — a `querySelectorAll` snapshot taken at load — and a `selected` node taken from it.
+   *
+   * The renderer replaces those nodes, so both went stale on the first repaint, and the damage
+   * was worse than dead code. `placeDetail()` positions the detail relative to `selected`: with
+   * that pointing at a DETACHED card, `insertBefore` moved `[data-sp-detail]` into a subtree no
+   * longer in the document. The element left the page entirely — `document.querySelector` for it
+   * returned null — so the mobile detail could not be shown again without a reload. Meanwhile an
+   * unconditional `state.tableId` on plan-created selected Table 1 on phones, against the
+   * designer's 2026-08-27 rule that mobile selects nothing.
+   *
+   * `isStacked()` and `STACK_MAX` stay below: both resize handles still read them. */
+
+
+  /* ── Resize: BOTH sheets ────────────────────────────────────────────────────
+   * Was written for one handle with `aside` and `--sp-aside-w` closed over. The Unassigned sheet
+   * needs the same behaviour (designer, 2026-09-10), so it is a function of (handle, panel,
+   * property) called twice rather than the same forty lines pasted with two names changed. */
+
+  /* Custom properties resolve to the AUTHORED string, so --ai-size-5 reads back as "17.5rem" and
+   * parseFloat gives 17.5, not 280. Convert through the root font size rather than hardcoding 16
+   * — a user with a larger default font would otherwise get wrong bounds. */
+  function tokenPx(name) {
+    var raw = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    var n = parseFloat(raw);
+    if (!isFinite(n)) return 0;
+    if (raw.indexOf('rem') !== -1) {
+      return n * parseFloat(getComputedStyle(document.documentElement).fontSize);
+    }
+    return n;
+  }
+
+  function makeResizable(handle, panel, prop) {
+    if (!handle || !panel) return;
+
+    /* MIN is --ai-size-5 (280) since 2026-09-10, RAISED from --ai-size-4 (240) at the designer's
+     * request that the detail sheet have a 280 floor.
+     *
+     * Worth flagging rather than burying: 240 was NOT invented — it appears in Frame 245's own
+     * variable list alongside the 320 default, so this clamp diverges from Figma. It had to move
+     * together with the panel's own `min-inline-size`, because a handle that drags to 240 against
+     * a panel that refuses to go below 280 is not a narrower rail, it is a handle that stops
+     * matching the thing it resizes.
+     *
+     * The MAX is half the row, which Figma does not specify — flagged in figma-notes as an
+     * interaction parameter needing a designer call, along with the arrow-key step. Note both
+     * sheets now use it independently, so both at maximum would leave the listing very narrow;
+     * that combination is part of the same open question. */
+    function bounds() {
+      var min = tokenPx('--ai-size-5');
+      var max = Math.max(min, plan.getBoundingClientRect().width / 2);
+      return { min: min, max: max };
+    }
+
+    function currentWidth() { return panel.getBoundingClientRect().width; }
+
+    function setWidth(px) {
+      var b = bounds();
+      var w = Math.min(b.max, Math.max(b.min, px));
+      plan.style.setProperty(prop, w + 'px');
+      handle.setAttribute('aria-valuenow', String(Math.round(w)));
+      handle.setAttribute('aria-valuemin', String(Math.round(b.min)));
+      handle.setAttribute('aria-valuemax', String(Math.round(b.max)));
+      return w;
+    }
+
+    var dragFrom = 0, dragWidth = 0;
+
+    handle.addEventListener('pointerdown', function (event) {
+      if (isStacked()) return;
+      dragFrom = event.clientX;
+      dragWidth = currentWidth();
+      handle.setAttribute('data-dragging', '');
+      /* Capture keeps the drag alive when the pointer outruns the 16px strip. */
+      if (handle.setPointerCapture) handle.setPointerCapture(event.pointerId);
+      event.preventDefault();
+    });
+
+    handle.addEventListener('pointermove', function (event) {
+      if (!handle.hasAttribute('data-dragging')) return;
+      /* Both panels sit to the RIGHT of their own edge, so dragging left makes them wider. */
+      setWidth(dragWidth - (event.clientX - dragFrom));
+    });
+
+    function endDrag(event) {
+      if (!handle.hasAttribute('data-dragging')) return;
+      handle.removeAttribute('data-dragging');
+      if (handle.releasePointerCapture && event.pointerId !== undefined) {
+        try { handle.releasePointerCapture(event.pointerId); } catch (e) { /* already gone */ }
+      }
+    }
+    handle.addEventListener('pointerup', endDrag);
+    handle.addEventListener('pointercancel', endDrag);
+
+    /* Keyboard: a separator that can only be dragged is unusable without a mouse — and with the
+     * pill gone this is the only affordance a keyboard user has at all. */
+    handle.addEventListener('keydown', function (event) {
+      if (isStacked()) return;
+      var b = bounds();
+      var step = tokenPx('--ai-spacing-5');           /* 16px per press */
+      var k = event.key;
+      if (k === 'ArrowLeft')       setWidth(currentWidth() + step);
+      else if (k === 'ArrowRight') setWidth(currentWidth() - step);
+      else if (k === 'Home')       setWidth(b.max);
+      else if (k === 'End')        setWidth(b.min);
+      else return;
+      event.preventDefault();
+    });
+
+    /* Double-click resets to Figma's 320 — the usual escape hatch once a splitter has been
+     * dragged somewhere unhelpful. */
+    handle.addEventListener('dblclick', function () {
+      if (isStacked()) return;
+      plan.style.removeProperty(prop);
+      handle.setAttribute('aria-valuenow', String(Math.round(currentWidth())));
+    });
+
+    /* Seed the ARIA values from the real rendered width — but ONLY from a real one.
+     *
+     * A hidden panel measures 0, which `setWidth` clamps up to the minimum and then writes: the
+     * Unassigned sheet is `hidden` until the toggle asks for it, so it seeded itself at 280 and
+     * opened narrower than Figma's 320 default. Measured, not guessed — it reported 280 on first
+     * reveal against the detail rail's 320.
+     *
+     * With no measurement to seed from, the property is left unset so the CSS fallback stands,
+     * and the ARIA values are published from that same fallback rather than from a zero. */
+    if (!isStacked()) {
+      var seed = currentWidth();
+      if (seed > 0) {
+        setWidth(seed);
+      } else {
+        var b0 = bounds();
+        handle.setAttribute('aria-valuenow', String(Math.round(tokenPx('--ai-size-6'))));
+        handle.setAttribute('aria-valuemin', String(Math.round(b0.min)));
+        handle.setAttribute('aria-valuemax', String(Math.round(b0.max)));
+      }
+    }
+  }
+
+  makeResizable(handle, aside, '--sp-aside-w');
+  makeResizable(poolHandle, pool, '--sp-pool-w');
+})();
+
+/* ══ Sticky scroll metrics ════════════════════════════════════════════
+ * Publishes the three numbers SeatingPlanner.css needs for the sticky model and cannot express
+ * on its own. All three are MEASURED, never designed — see the block comment on
+ * `.cc-control__page--seating` for why each one has to be:
+ *
+ *   --sp-header-retire   how far the header may slide up before its toolbar pins = header
+ *                        height minus toolbar height, i.e. the event bar plus the room carousel
+ *   --sp-toolbar-h       the toolbar's own height, which is padding + content and grows if the
+ *                        room name wraps
+ *   --sp-scrollport-h    the page's visible height, so the rails need no arithmetic about how
+ *                        tall the chrome happens to be
+ *
+ * A ResizeObserver rather than `matchMedia` or a resize listener, because every one of these
+ * changes without the window changing at all: docking the SidebarMenu narrows the column, which
+ * rewraps the toolbar, which changes the retire distance (CLAUDE.md §4a).
+ */
+(function () {
+  'use strict';
+
+  var page = document.querySelector('.cc-control__page--seating');
+  if (!page) return;
+
+  /* The header that HAS a toolbar — Type=No Plans has none and never pins, which is the same
+   * condition the CSS selector states. */
+  var header = page.querySelector('.seating-header:has(.seating-header__toolbar)')
+            || page.querySelector('.seating-header .seating-header__toolbar');
+  if (header && !header.classList.contains('seating-header')) header = header.closest('.seating-header');
+  var toolbar = header && header.querySelector('.seating-header__toolbar');
+  if (!header || !toolbar) return;
+
+  var last = '';
+  function sync() {
+    var toolbarRect = toolbar.getBoundingClientRect();
+    var headerRect = header.getBoundingClientRect();
+    var toolbarH = toolbarRect.height;
+    var headerH = headerRect.height;
+    var portH = page.clientHeight;
+
+    /* The retire distance is the gap between the two boxes' TOPS, not `headerH - toolbarH`.
+     * Those differ by the header's bottom border — 1px, which is exactly enough to leave the
+     * pinned toolbar a pixel clear of the chrome (measured: toolbar landed at -1 with the
+     * subtracted form). Reading the distance directly is also border-agnostic, so a change to
+     * the header's stroke cannot silently reintroduce the offset. */
+    var retire = toolbarRect.top - headerRect.top;
+
+    /* Guard against a hidden header measuring 0: `data-seating-state` keeps the plan markup in
+     * the document while another state is showing, and writing a 0 retire there would leave a
+     * stale 0 behind when it comes back. Nothing to publish until it has a size. */
+    if (!toolbarH || !headerH) return;
+
+    /* `Math.max(0, ...)` because the retire distance is a slide, not a push: if the toolbar ever
+     * measured taller than its own header, a positive inset would pin the header BELOW the
+     * chrome and leave a gap the page scrolls behind. */
+    var key = toolbarH + '|' + headerH + '|' + portH + '|' + retire;
+    if (key === last) return;     /* the observer fires on every layout; only write on a change */
+    last = key;
+
+    page.style.setProperty('--sp-toolbar-h', toolbarH + 'px');
+    page.style.setProperty('--sp-header-retire', Math.max(0, retire) + 'px');
+    page.style.setProperty('--sp-scrollport-h', portH + 'px');
+  }
+
+  if (window.ResizeObserver) {
+    var ro = new ResizeObserver(sync);
+    ro.observe(page);
+    ro.observe(header);
+    ro.observe(toolbar);
+  }
+
+  sync();
+})();
+
+/* ══ Scroll handoff ═════════════════════════════════════════════════
+ * Side by side, this screen has FOUR scrollers: the page, and one inside each of the three
+ * pinned sheets. The page's own travel is small and fixed — the part of the header that retires,
+ * around 250px — and until it is spent the sheets hang that far below the fold, because they
+ * stand at the height they will have once the toolbar pins.
+ *
+ * Left to the browser, that travel is close to unreachable. Scroll chaining runs inner-first, so
+ * a wheel over the card grid scrolls the grid and only reaches the page once the grid hits its
+ * end: with a long plan you would scroll through every table before the header retired and the
+ * bottoms of all three sheets came into view.
+ *
+ * So downward wheel is spent on the page first, wherever the pointer is. One or two notches
+ * retires the header, everything lines up, and from then on the sheets scroll normally. UPWARD
+ * is left entirely alone — native chaining already does the right thing there, returning the
+ * page only once the inner scroller is back at its top, which is the symmetric behaviour.
+ *
+ * Touch is not intercepted. Below 1023 the page is the only scroller anyway, which is every
+ * touch device this screen is used on; a wide touchscreen falls back to native chaining.
+ */
+(function () {
+  'use strict';
+
+  var page = document.querySelector('.cc-control__page--seating');
+  var plan = document.querySelector('[data-sp-plan]');
+  if (!page || !plan) return;
+
+  /* Same threshold as the CSS and as the selection code's STACK_MAX, measured off the container
+   * rather than the viewport for the reason CLAUDE.md §4a gives — a docked SidebarMenu shrinks
+   * this column with no window resize at all. */
+  var STACK_MAX = 1023;
+  var stacked = false;
+  function measure() { stacked = page.getBoundingClientRect().width <= STACK_MAX; }
+  if (window.ResizeObserver) new ResizeObserver(measure).observe(page);
+  measure();
+
+  /* Wheel deltas arrive in three units. Lines are what Firefox sends; 16 is a conventional line,
+   * and the exact figure does not matter because the value is handed straight to a scroll
+   * position that clamps itself. */
+  function pixels(event) {
+    if (event.deltaMode === 1) return event.deltaY * 16;
+    if (event.deltaMode === 2) return event.deltaY * page.clientHeight;
+    return event.deltaY;
+  }
+
+  plan.addEventListener('wheel', function (event) {
+    if (stacked) return;          /* one scroller already; nothing to hand off */
+    if (event.ctrlKey) return;    /* pinch-zoom, not a scroll */
+
+    var delta = pixels(event);
+    if (delta <= 0) return;       /* upward: native chaining is already correct */
+
+    var remaining = (page.scrollHeight - page.clientHeight) - page.scrollTop;
+    if (remaining <= 0.5) return; /* page spent — the sheet under the pointer takes it */
+
+    event.preventDefault();
+    page.scrollTop += Math.min(delta, remaining);
+  }, { passive: false });
+})();
+
+/* ══ Minimise header ═════════════════════════════════════════════════
+ * The overflow menu's "Minimise header" row holds the screen in the state a scroll already
+ * reaches. All the geometry is CSS — see `.is-header-minimised` in SeatingPlanner.css, which
+ * reuses the sticky rule's own offset so the two views cannot drift apart. This is only the
+ * toggle, the label and the state.
+ *
+ * The row is desktop-only and CSS hides it below 1023, so no width check is needed here: a hidden
+ * row cannot be clicked. Scrolling still works exactly as before in either state.
+ *
+ * TODO(backend:SeatingPlanner): `localStorage` only, so the choice follows the BROWSER rather than
+ * the user — a second machine starts expanded again. The real home is a per-user UI preference
+ * alongside the last-used event; see seating-header-minimised.
+ */
+(function () {
+  'use strict';
+
+  var page = document.querySelector('.cc-control__page--seating');
+  if (!page) return;
+
+  var MINIMISED = 'is-header-minimised';
+  /* Same `sp:` namespace the prototype's `sp:lastEventId` uses. */
+  var KEY = 'sp:headerMinimised';
+
+  /* Every read and write is guarded. `localStorage` is not merely empty in a private window or
+   * with site data blocked — the accessor itself THROWS, so an unguarded read here would take the
+   * whole module down and with it the toggle it is trying to restore. */
+  function remember(on) {
+    try { localStorage.setItem(KEY, on ? '1' : '0'); } catch (e) {}
+  }
+
+  function restore() {
+    var saved = null;
+    try { saved = localStorage.getItem(KEY); } catch (e) {}
+    /* Only ever ADD the class. Absent storage means "no preference", which is the expanded
+     * default the markup already renders — removing it here would be the same outcome by a
+     * longer route, and would fight anything else that set it before this ran. */
+    if (saved === '1') page.classList.add(MINIMISED);
+    syncLabel(page.classList.contains(MINIMISED));
+  }
+
+  /* The visible label and glyph swap in CSS off the page class, so a restored state needs nothing
+   * here — but the accessible name is an attribute and does. Split out so restore and toggle
+   * cannot disagree about it. */
+  function syncLabel(on) {
+    Array.prototype.forEach.call(document.querySelectorAll('[data-sp-minimise-header]'), function (b) {
+      b.setAttribute('aria-label', on ? 'Expand header' : 'Minimise header');
+    });
+  }
+
+  /* Delegated. The menu row is authored in the page, but the plan header is re-rendered by
+   * `seating-app.js`, so a direct binding would be lost the first time a plan changed. */
+  document.addEventListener('click', function (event) {
+    var btn = event.target.closest ? event.target.closest('[data-sp-minimise-header]') : null;
+    if (!btn) return;
+
+    var on = page.classList.toggle(MINIMISED);
+    syncLabel(on);
+    remember(on);
+  });
+
+  restore();
+})();
+
+/* ══ Chrome shadow on scroll ══════════════════════════════════════════════════════════════
+ * This screen deliberately has no header block and no chrome hairline (both designer calls), so
+ * nothing separates the chrome from content sliding under it. A `--ai-shadow-sm` that appears
+ * only once the page has actually scrolled gives the separation without adding permanent chrome.
+ *
+ * Keyed off the PAGE's scrollTop, because that is the scroller that moves content under the
+ * chrome — now the only one, at every width (2026-09-11). It used to be qualified: side by side,
+ * the card grid scrolled inside its own box and nothing passed under the chrome, so no shadow
+ * appeared there. With one scroller the shadow is live on every layout, which is what this was
+ * written for.
+ */
+(function () {
+  'use strict';
+
+  var page = document.querySelector('.cc-control__page--seating');
+  var chrome = document.querySelector('.cc-control__chrome');
+  if (!page || !chrome) return;
+
+  var on = null;
+  function sync() {
+    var scrolled = page.scrollTop > 0;
+    if (scrolled === on) return;      /* scroll fires continuously; only touch the DOM on a flip */
+    on = scrolled;
+    chrome.classList.toggle('is-scrolled', scrolled);
+  }
+
+  /* `passive` because this never calls preventDefault — without it the listener can block the
+   * scroll it is only observing. */
+  page.addEventListener('scroll', sync, { passive: true });
+
+  /* Also re-check when the page stops being scrollable at all: switching to the side-by-side
+   * layout, or a panel change, can leave `is-scrolled` stuck on with nothing scrolled. */
+  if (window.ResizeObserver) new ResizeObserver(sync).observe(page);
+
+  sync();
+})();
+
+/* ── Edit Plan modal ─────────────────────────────────────────────────────────────────────────
+ * Figma 3515:176248 (desktop) / 3515:227054 (mobile). Opened by a room card's pencil, pre-filled
+ * from that card, and edits only Plan name and Room / location.
+ *
+ * A separate modal from create-plan by the designer's decision (2026-08-28), so this is a separate
+ * IIFE rather than a mode of that one. The two are deliberately parallel in shape — same open/close
+ * contract, same error handling, same focus trap — so a change to one is easy to mirror.
+ */
+(function () {
+  'use strict';
+
+  if (window.__editPlanReady) return;
+  window.__editPlanReady = true;
+
+  var OPEN_CLASS = 'modal-overlay--open';
+  var FOCUSABLE = [
+    'a[href]', 'button:not([disabled])', 'input:not([disabled])',
+    'select:not([disabled])', 'textarea:not([disabled])', '[tabindex]:not([tabindex="-1"])'
+  ].join(',');
+
+  var overlay = document.querySelector('[data-edit-plan]');
+  if (!overlay) return;
+
+  var dialog = overlay.querySelector('[role="dialog"]');
+  var form = overlay.querySelector('#edit-plan-form');
+  var helpToggle = overlay.querySelector('#ep-help-toggle');
+  var nameInput = overlay.querySelector('#ep-name');
+  var roomInput = overlay.querySelector('#ep-room');
+  var returnFocusTo = null;
+  /* The card being edited. Save writes back to this one, so it must be remembered across the
+   * modal's lifetime rather than re-derived on submit — by then the click target is gone. */
+  var editingCard = null;
+
+  function isOpen() { return overlay.classList.contains(OPEN_CLASS); }
+
+  function focusable() {
+    return Array.prototype.filter.call(
+      dialog.querySelectorAll(FOCUSABLE),
+      function (el) { return el.offsetParent !== null; }
+    );
+  }
+
+  function field(name) { return overlay.querySelector('[data-ep-field="' + name + '"]'); }
+
+  Array.prototype.forEach.call(overlay.querySelectorAll('[data-ep-help]'), function (help) {
+    help.setAttribute('data-ep-help-original', help.textContent.trim());
+  });
+
+  function setError(name, message) {
+    var wrap = field(name);
+    if (!wrap) return;
+    wrap.classList.add('input--error');
+    var help = wrap.querySelector('[data-ep-help]');
+    if (help) {
+      help.textContent = message;
+      help.setAttribute('role', 'alert');
+    }
+    var control = wrap.querySelector('.input__control');
+    if (control) control.setAttribute('aria-invalid', 'true');
+  }
+
+  function clearErrors() {
+    Array.prototype.forEach.call(overlay.querySelectorAll('[data-ep-field]'), function (wrap) {
+      wrap.classList.remove('input--error');
+      var help = wrap.querySelector('[data-ep-help]');
+      if (help) {
+        help.textContent = help.getAttribute('data-ep-help-original') || '';
+        help.removeAttribute('role');
+      }
+      var control = wrap.querySelector('.input__control');
+      if (control) control.removeAttribute('aria-invalid');
+    });
+  }
+
+  function open(card, trigger) {
+    if (isOpen()) return;
+    editingCard = card;
+    returnFocusTo = trigger || document.activeElement;
+    clearErrors();
+
+    /* Pre-fill from the card. The name is the select button's text — RoomCard renders it as a
+     * button so the whole card is a select target, so `.room-card__select` IS the plan name.
+     *
+     * RoomCard has nowhere to DISPLAY the room (it shows tables, seats and a progress bar), so the
+     * room is stashed on the card in `data-ep-room` when saved and read back here. Without that the
+     * field would open blank every time and silently discard whatever was typed last — the existing
+     * prototype (`seating-edit-plan` in the handover manifest) updates the room on save, so
+     * dropping it here would have been a regression against documented behaviour, not a
+     * simplification. First open falls back to the placeholder, which is correct: no room is set. */
+    var nameEl = card && card.querySelector('.room-card__select');
+    if (nameInput) nameInput.value = nameEl ? nameEl.textContent.trim() : '';
+    if (roomInput) roomInput.value = (card && card.getAttribute('data-ep-room')) || '';
+
+    overlay.classList.add(OPEN_CLASS);
+    if (trigger) trigger.setAttribute('aria-expanded', 'true');
+    if (nameInput) nameInput.focus();
+    else dialog.focus();
+  }
+
+  function close() {
+    if (!isOpen()) return;
+    overlay.classList.remove(OPEN_CLASS);
+    Array.prototype.forEach.call(document.querySelectorAll('[data-ep-open]'), function (b) {
+      b.setAttribute('aria-expanded', 'false');
+    });
+    /* Reject `<body>` as a focus target, and a trigger that has since left the DOM — the same
+     * guard the picker and create-plan use. */
+    var target = (returnFocusTo && returnFocusTo !== document.body && returnFocusTo.isConnected)
+      ? returnFocusTo
+      : dialog;
+    returnFocusTo = null;
+    editingCard = null;
+    target.focus();
+  }
+
+  /* Delegated, because a room card can be added after load. Scoped to `[data-ep-open]` and NOT to
+   * the pencil icon or the aria-label: `createIcons()` replaces the <i data-lucide> with an <svg>,
+   * so an icon-attribute selector stops matching after init, and `aria-label^="Edit"` would catch
+   * all twelve TableCard pencils on this screen too. */
+  document.addEventListener('click', function (event) {
+    var btn = event.target.closest ? event.target.closest('[data-ep-open]') : null;
+    if (!btn) return;
+    event.preventDefault();
+    open(btn.closest('.room-card'), btn);
+  });
+
+  Array.prototype.forEach.call(overlay.querySelectorAll('[data-ep-close]'), function (btn) {
+    btn.addEventListener('click', close);
+  });
+
+  overlay.addEventListener('click', function (event) {
+    if (event.target === overlay) close();
+  });
+
+  overlay.addEventListener('keydown', function (event) {
+    if (!isOpen()) return;
+    if (event.key === 'Escape') { close(); return; }
+    if (event.key !== 'Tab') return;
+
+    var items = focusable();
+    if (!items.length) return;
+    var first = items[0], last = items[items.length - 1], active = document.activeElement;
+
+    if (event.shiftKey && (active === first || !dialog.contains(active))) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && (active === last || !dialog.contains(active))) {
+      event.preventDefault();
+      first.focus();
+    }
+  });
+
+  if (helpToggle) {
+    helpToggle.addEventListener('click', function () {
+      /* Toggle.js owns the switch's own flip and has already updated aria-checked by the time this
+       * runs, so read it rather than tracking a second copy of the state. */
+      var on = helpToggle.getAttribute('aria-checked') === 'true';
+      form.classList.toggle('edit-plan__form--help', on);
+    });
+  }
+
+  if (form) {
+    form.addEventListener('submit', function (event) {
+      event.preventDefault();
+      clearErrors();
+
+      var name = nameInput ? nameInput.value.trim() : '';
+      var room = roomInput ? roomInput.value.trim() : '';
+      var ok = true;
+
+      if (!name) { setError('name', 'Plan name is required.'); ok = false; }
+      if (!room) { setError('room', 'Room or location is required.'); ok = false; }
+      if (!ok) {
+        var firstBad = overlay.querySelector('.input--error .input__control');
+        if (firstBad) firstBad.focus();
+        return;
+      }
+
+      /* THE MODEL OWNS THE RENAME (2026-09-14). This wrote the new name onto the card, re-labelled
+       * its Edit and Delete buttons, and updated the toolbar when the renamed plan was the active
+       * one — carefully, matching on the previous name so a stale label could not be overwritten
+       * with the wrong plan's. All of it was undone by the next repaint, because `D.plans` still
+       * held the old name. Measured: DOM "RENAMED BALLROOM", model "Main Ballroom", and one
+       * `render()` put the old name back.
+       *
+       * None of that bookkeeping is replaced. `renderRooms()` builds the card, both aria-labels
+       * and the toolbar from the plan, so a single model write carries to every one of them and
+       * they cannot disagree.
+       *
+       * The room/location now has somewhere to go, which it did not when this was written: plans
+       * created since 2026-08-27 carry `room`, so the field is written back rather than dropped. */
+      if (editingCard) {
+        var planId = editingCard.getAttribute('data-sp-plan-card');
+        if (planId && window.SeatingData) {
+          document.dispatchEvent(new CustomEvent('seating-planner:plan-updated', {
+            bubbles: true, detail: { planId: planId, name: name, room: room }
+          }));
+        } else {
+          /* No model on the page — the SeatingHeader pattern demo. Keep the card readable. */
+          var nameEl = editingCard.querySelector('.room-card__select');
+          if (nameEl) nameEl.textContent = name;
+          editingCard.setAttribute('data-ep-room', room);
+        }
+      }
+
+      close();
+    });
+  }
+})();
+
+/* ── Delete Plan ───────────────────────────────────────────────────────────────────────────
+ * Figma 3515:176990 (desktop) / 3515:227162 (mobile). Deliberately parallel in shape to the
+ * editPlan IIFE above — same open/close contract, same focus trap — so a change to one is easy to
+ * mirror. What it does NOT share is a form: nothing is being edited, so there is no validation,
+ * no help toggle, and Cancel is the safe default that focus opens on.
+ */
+(function () {
+  'use strict';
+
+  if (window.__deletePlanReady) return;
+  window.__deletePlanReady = true;
+
+  var OPEN_CLASS = 'modal-overlay--open';
+  var FOCUSABLE = [
+    'a[href]', 'button:not([disabled])', 'input:not([disabled])',
+    'select:not([disabled])', 'textarea:not([disabled])', '[tabindex]:not([tabindex="-1"])'
+  ].join(',');
+
+  var overlay = document.querySelector('[data-delete-plan]');
+  if (!overlay) return;
+
+  var dialog = overlay.querySelector('[role="alertdialog"]');
+  var nameEl = overlay.querySelector('[data-dp-name]');
+  var consequenceEl = overlay.querySelector('[data-dp-consequence]');
+  var cancelBtn = overlay.querySelector('.btn--secondary[data-dp-close]');
+  var returnFocusTo = null;
+  var deletingCard = null;
+
+  function isOpen() { return overlay.classList.contains(OPEN_CLASS); }
+
+  function focusable() {
+    return Array.prototype.filter.call(
+      dialog.querySelectorAll(FOCUSABLE),
+      function (el) { return el.offsetParent !== null; }
+    );
+  }
+
+  function plural(n, one, many) { return n === 1 ? one : many; }
+
+  /* Counts come off the card, which renders them as "12 tables · 0/148 seated" — so the seated
+   * figure is the NUMERATOR of that fraction, not the whole of it, and 148 is capacity. Parsed by
+   * regex rather than by splitting on the separator: the middle dot is a presentation choice and
+   * `.room-card__seated` is a span the markup can drop, so anything positional would break the
+   * moment RoomCard restyles. A count that will not parse yields null and is treated as unknown
+   * below rather than as zero — silently claiming "0 tables" about a plan that has some is exactly
+   * the understatement seating-delete-plan warns about. */
+  function readCounts(card) {
+    var el = card && card.querySelector('.room-card__counts');
+    var text = el ? el.textContent : '';
+    var tables = /(\d+)\s+tables?\b/i.exec(text);
+    var seated = /(\d+)\s*\/\s*(\d+)/.exec(text);
+    return {
+      tables: tables ? parseInt(tables[1], 10) : null,
+      seated: seated ? parseInt(seated[1], 10) : null
+    };
+  }
+
+  /* The consequence line is DATA-DRIVEN, which is the documented behaviour for this dialog: the
+   * people clause is dropped entirely when nobody is seated, rather than rendering "and 0 seated
+   * people returned to Unassigned" — a consequence that would not happen. Figma draws the full
+   * form (30 tables / 240 people) because that is the state its frame shows; this screen's single
+   * plan is 12 tables with 0 seated, so it correctly renders the short form. */
+  function buildConsequence(counts) {
+    var frag = document.createDocumentFragment();
+    if (counts.tables === null) {
+      frag.appendChild(document.createTextNode(
+        'Its tables will be removed and any seated people returned to Unassigned.'));
+      return frag;
+    }
+
+    var tablesStrong = document.createElement('strong');
+    tablesStrong.textContent = String(counts.tables);
+
+    frag.appendChild(document.createTextNode('Its '));
+    frag.appendChild(tablesStrong);
+    frag.appendChild(document.createTextNode(
+      ' ' + plural(counts.tables, 'table', 'tables') +
+      ' will be removed'));
+
+    if (counts.seated) {
+      var seatedStrong = document.createElement('strong');
+      seatedStrong.textContent = String(counts.seated);
+      frag.appendChild(document.createTextNode(' and '));
+      frag.appendChild(seatedStrong);
+      frag.appendChild(document.createTextNode(
+        ' seated ' + plural(counts.seated, 'person', 'people') + ' returned to Unassigned'));
+    }
+
+    frag.appendChild(document.createTextNode('.'));
+    return frag;
+  }
+
+  function open(card, trigger) {
+    if (isOpen()) return;
+    deletingCard = card;
+    returnFocusTo = trigger || document.activeElement;
+
+    var selectEl = card && card.querySelector('.room-card__select');
+    if (nameEl) nameEl.textContent = selectEl ? selectEl.textContent.trim() : 'this plan';
+    if (consequenceEl) {
+      consequenceEl.textContent = '';
+      consequenceEl.appendChild(buildConsequence(readCounts(card)));
+    }
+
+    overlay.classList.add(OPEN_CLASS);
+    if (trigger) trigger.setAttribute('aria-expanded', 'true');
+    /* Cancel, not Delete. The destructive control should never be one Enter away from a dialog
+     * that has only just appeared. */
+    if (cancelBtn) cancelBtn.focus();
+    else dialog.focus();
+  }
+
+  function close(focusTarget) {
+    if (!isOpen()) return;
+    overlay.classList.remove(OPEN_CLASS);
+    Array.prototype.forEach.call(document.querySelectorAll('[data-dp-open]'), function (b) {
+      b.setAttribute('aria-expanded', 'false');
+    });
+
+    /* On CANCEL the trigger is still there and gets focus back. On CONFIRM it has just been
+     * deleted along with its card, so the caller passes somewhere to land instead — leaving focus
+     * on a removed node drops it to <body> and loses the keyboard user's place entirely. */
+    var target = focusTarget ||
+      ((returnFocusTo && returnFocusTo !== document.body && returnFocusTo.isConnected)
+        ? returnFocusTo
+        : dialog);
+    returnFocusTo = null;
+    deletingCard = null;
+    if (target) target.focus();
+  }
+
+  /* Delegated for the same reason as edit: a room card can be added after load. */
+  document.addEventListener('click', function (event) {
+    var btn = event.target.closest ? event.target.closest('[data-dp-open]') : null;
+    if (!btn) return;
+    event.preventDefault();
+    open(btn.closest('.room-card'), btn);
+  });
+
+  Array.prototype.forEach.call(overlay.querySelectorAll('[data-dp-close]'), function (btn) {
+    btn.addEventListener('click', function () { close(); });
+  });
+
+  overlay.addEventListener('click', function (event) {
+    if (event.target === overlay) close();
+  });
+
+  overlay.addEventListener('keydown', function (event) {
+    if (!isOpen()) return;
+    if (event.key === 'Escape') { close(); return; }
+    if (event.key !== 'Tab') return;
+
+    var items = focusable();
+    if (!items.length) return;
+    var first = items[0], last = items[items.length - 1], active = document.activeElement;
+
+    if (event.shiftKey && (active === first || !dialog.contains(active))) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && (active === last || !dialog.contains(active))) {
+      event.preventDefault();
+      first.focus();
+    }
+  });
+
+  var confirmBtn = overlay.querySelector('[data-dp-confirm]');
+  if (confirmBtn) {
+    confirmBtn.addEventListener('click', function () {
+      var card = deletingCard;
+      if (!card) { close(); return; }
+
+      var rooms = card.parentNode;
+      var planId = card.getAttribute('data-sp-plan-card');
+
+      /* THE MODEL DELETES IT, not this (2026-09-14). This used to remove the card element and,
+       * when it was the selected plan, its table cards too — and that was a lie the next render
+       * undid: `D.plans` still held the plan, so anything that repainted (selecting a table,
+       * searching, creating a plan) brought it straight back. Measured before fixing: model 4,
+       * DOM 3, then 4 again after one `render()`.
+       *
+       * The same division the Table form already uses — announce what happened and let
+       * `seating-app.js` own the data. It removes the plan, re-points the selection, re-derives
+       * every count (the deleted plan's occupants return to the pool with nothing to reset) and
+       * repaints. `dispatchEvent` is synchronous, so by the line after this the strip is rebuilt
+       * and the focus lookup below reads the real survivors.
+       *
+       * The DOM fallback survives for a page that has the modal but no model — the SeatingHeader
+       * pattern demo — where nothing would otherwise remove the card. */
+      if (planId && window.SeatingData) {
+        document.dispatchEvent(new CustomEvent('seating-planner:plan-deleted', {
+          bubbles: true, detail: { planId: planId }
+        }));
+      } else if (card.parentNode) {
+        card.parentNode.removeChild(card);
+      }
+
+      /* Land focus on the next surviving plan, or on the plans region itself when the last one has
+       * gone. `tabindex="-1"` is set here rather than in the markup so the container never becomes
+       * a Tab stop — it only needs to be focusABLE, not focusable by keyboard traversal. */
+      var next = rooms ? rooms.querySelector('.room-card__select') : null;
+      if (!next && rooms) {
+        rooms.setAttribute('tabindex', '-1');
+        next = rooms;
+      }
+
+      /* Deleting the LAST plan now returns the screen to "No seating plans yet" — `seating-app.js`
+       * announces `plans-empty` and the state machine at the top of this file switches. The old
+       * note here said this was "deliberately not invented" for want of a Figma frame; that was
+       * the wrong reading. Screen 3 (`3515:176082`) IS that state, already built and already in
+       * this page — nothing needed inventing, only wiring back to it. */
+      close(next);
+    });
+  }
+})();
+
+/* ── Table form (Edit table) ───────────────────────────────────────────────────────────────
+ * Figma 3515:178044 desktop / 3515:227256 mobile, plus the sponsor-lookup, reduced-capacity and
+ * help-on states. Same open/close/focus-trap contract as editPlan and deletePlan above.
+ *
+ * Edit only — there is no New mode here (designer, 2026-08-29). The toolbar's Add Table button
+ * stays unwired; see seating-table-form.
+ */
+(function () {
+  'use strict';
+
+  if (window.__tableFormReady) return;
+  window.__tableFormReady = true;
+
+  var OPEN_CLASS = 'modal-overlay--open';
+  var FOCUSABLE = [
+    'a[href]', 'button:not([disabled])', 'input:not([disabled])',
+    'select:not([disabled])', 'textarea:not([disabled])', '[tabindex]:not([tabindex="-1"])'
+  ].join(',');
+
+  var overlay = document.querySelector('[data-table-form]');
+  if (!overlay) return;
+
+  var dialog = overlay.querySelector('[role="dialog"]');
+  var form = overlay.querySelector('#table-form-form');
+  var helpToggle = overlay.querySelector('#tf-help-toggle');
+  var nameInput = overlay.querySelector('#tf-name');
+  var seatsInput = overlay.querySelector('#tf-seats');
+  var hostInput = overlay.querySelector('#tf-host');
+  var tierValue = overlay.querySelector('#tf-tier .sel__value');
+  var shapeValue = overlay.querySelector('#tf-shape .sel__value');
+  var sponsorValue = overlay.querySelector('[data-tf-sponsor-value]');
+  var sponsorSearch = overlay.querySelector('[data-tf-sponsor-search]');
+  var sponsorList = overlay.querySelector('[data-tf-sponsor-list]');
+  var warning = overlay.querySelector('[data-tf-warning]');
+  var warningText = overlay.querySelector('[data-tf-warning-text]');
+
+  var titleEl = overlay.querySelector('#table-form-title');
+  var returnFocusTo = null;
+  var editingCard = null;
+  /* 'edit' or 'add'. Add Table is the SAME modal — desktop Add (Figma 1:11787) is
+   * structurally identical to desktop Edit down to the 462 grid, the 88px tier field with
+   * its action row and the 73px footer, so a second dialog would only be a copy that drifts. */
+  var mode = 'edit';
+  /* The seated count at OPEN time. The warning compares against this rather than re-reading the
+   * card, because the card is not rewritten until Save — re-reading mid-edit would compare the
+   * typed capacity against itself once a first save had happened. */
+  var seatedAtOpen = 0;
+  /* Capacity at open, so the plan total can move by the DELTA. Recomputing the plan from the
+   * 12 cards would be more correct but is the server's job — see seating-table-form. */
+  var counts0 = { seated: 0, capacity: 0 };
+
+  function isOpen() { return overlay.classList.contains(OPEN_CLASS); }
+
+  function focusable() {
+    return Array.prototype.filter.call(
+      dialog.querySelectorAll(FOCUSABLE),
+      function (el) { return el.offsetParent !== null; }
+    );
+  }
+
+  function field(name) { return overlay.querySelector('[data-tf-field="' + name + '"]'); }
+
+  Array.prototype.forEach.call(overlay.querySelectorAll('[data-tf-help]'), function (help) {
+    help.setAttribute('data-tf-help-original', help.textContent.trim());
+  });
+
+  /* No `setError` here any more — it existed only for the retired submit handler, and
+   * `seating-app.js` has its own `fieldError`. `clearErrors` below stays: this module still
+   * clears the form when it OPENS, whoever wrote the errors. */
+
+  function clearErrors() {
+    Array.prototype.forEach.call(overlay.querySelectorAll('[data-tf-field]'), function (wrap) {
+      wrap.classList.remove('input--error');
+      var help = wrap.querySelector('[data-tf-help]');
+      if (help) {
+        help.textContent = help.getAttribute('data-tf-help-original') || '';
+        help.removeAttribute('role');
+      }
+      var control = wrap.querySelector('.input__control');
+      if (control) control.removeAttribute('aria-invalid');
+    });
+  }
+
+  /* "0 / 10 seated" -> { seated: 0, capacity: 10 }. Regex rather than a split, for the same
+   * reason as deletePlan: the separator and the trailing word are presentation. */
+  function readCounts(card) {
+    var el = card && card.querySelector('.table-card__count');
+    var m = el ? /(\d+)\s*\/\s*(\d+)/.exec(el.textContent) : null;
+    return m ? { seated: parseInt(m[1], 10), capacity: parseInt(m[2], 10) }
+             : { seated: 0, capacity: 0 };
+  }
+
+  function plural(n, one, many) { return n === 1 ? one : many; }
+
+  /* Live, and non-blocking: Save stays enabled and the people really are returned (designer,
+   * 2026-08-29). Consistent with the other three return paths already documented on
+   * seating-unassigned-tray. */
+  function syncWarning() {
+    if (!warning || !seatsInput) return;
+    var next = parseInt(seatsInput.value, 10);
+    var removed = (isFinite(next) && seatedAtOpen > next) ? seatedAtOpen - next : 0;
+    if (!removed) { warning.hidden = true; return; }
+    warningText.textContent =
+      removed + ' ' + plural(removed, 'person', 'people') + ' will be returned to Unassigned — ' +
+      'the last ' + removed + ' ' + plural(removed, 'seat', 'seats') + ' of ' + seatedAtOpen + ' seated.';
+    warning.hidden = false;
+  }
+
+  /* max(existing) + 1, deliberately NOT count + 1: table numbers are never resequenced after a
+   * delete, so gaps are expected and a count-based number would collide with a survivor. That
+   * rule is already recorded on seating-delete-table. */
+  function nextTableNumber() {
+    var max = 0;
+    Array.prototype.forEach.call(document.querySelectorAll('.table-card__select'), function (el) {
+      var m = /(\d+)/.exec(el.textContent || '');
+      if (m) max = Math.max(max, parseInt(m[1], 10));
+    });
+    /* Also consider the stable ids, not just the visible names. A card renamed to something with
+     * no digits ("Headline Sponsors") drops out of the name scan, so name-only numbering handed
+     * out an id that a renamed card was already using — measured: adding two tables produced two
+     * cards both claiming data-sp-table="14". */
+    Array.prototype.forEach.call(document.querySelectorAll('[data-sp-table]'), function (el) {
+      var v = parseInt(el.getAttribute('data-sp-table'), 10);
+      if (isFinite(v)) max = Math.max(max, v);
+    });
+    return max + 1;
+  }
+
+  /* Defaults read off the Add frames, not carried across from Edit: tier Standard, sponsor
+   * placeholder, host empty, seats 10, shape Round — and the name field EMPTY behind a "Table N"
+   * placeholder, because the frame draws that number in placeholder grey rather than as a filled
+   * value. It is a suggestion, not something pre-committed on the user's behalf. */
+  function resetFields() {
+    var n = nextTableNumber();
+    if (nameInput) { nameInput.value = ''; nameInput.placeholder = 'Table ' + n; }
+    if (seatsInput) seatsInput.value = '10';
+    if (hostInput) hostInput.value = '';
+    if (tierValue) tierValue.textContent = 'Standard';
+    if (shapeValue) shapeValue.textContent = 'Round';
+    if (sponsorValue) sponsorValue.textContent = 'Search Accounts\u2026';
+  }
+
+  function openAdd(trigger) {
+    if (isOpen()) return;
+    mode = 'add';
+    editingCard = null;
+    returnFocusTo = trigger || document.activeElement;
+    clearErrors();
+    resetFields();
+    /* Nobody is seated at a table that does not exist yet, so the reduced-capacity warning can
+     * never apply here — and these two keep it that way rather than relying on it. */
+    seatedAtOpen = 0;
+    counts0 = { seated: 0, capacity: 0 };
+    if (warning) warning.hidden = true;
+    if (titleEl) titleEl.textContent = 'Add Table';
+
+    overlay.classList.add(OPEN_CLASS);
+    if (trigger) trigger.setAttribute('aria-expanded', 'true');
+    if (nameInput) nameInput.focus();
+    else dialog.focus();
+  }
+
+  function open(card, trigger) {
+    mode = 'edit';
+    /* "Edit table" and "Add Table" — Figma capitalises the two titles differently and both are
+     * reproduced rather than harmonised, the same call already made for the Delete Plan dialog's
+     * "Delete plan" heading against its "Delete Plan" button. */
+    if (titleEl) titleEl.textContent = 'Edit table';
+    if (isOpen()) return;
+    editingCard = card;
+    returnFocusTo = trigger || document.activeElement;
+    clearErrors();
+
+    var nameEl = card && card.querySelector('.table-card__select');
+    var counts = readCounts(card);
+    seatedAtOpen = counts.seated;
+    counts0 = counts;
+
+    if (nameInput) nameInput.value = nameEl ? nameEl.textContent.trim() : '';
+    if (seatsInput) seatsInput.value = counts.capacity || '';
+    /* Tier, sponsor, host and shape have nowhere to live on the card in this template — it
+     * renders no tier chip (Figma hides the TableType instance) and no sponsor line — so they
+     * round-trip on the card's own dataset, the same trick edit-plan uses for the room. First
+     * open falls back to the defaults, which is correct: nothing is set. */
+    if (hostInput) hostInput.value = (card && card.getAttribute('data-tf-host')) || '';
+    if (tierValue) tierValue.textContent = (card && card.getAttribute('data-tf-tier')) || 'Standard';
+    if (shapeValue) shapeValue.textContent = (card && card.getAttribute('data-tf-shape')) || 'Round';
+    if (sponsorValue) sponsorValue.textContent = (card && card.getAttribute('data-tf-sponsor')) || 'Search Accounts…';
+
+    if (warning) warning.hidden = true;
+
+    overlay.classList.add(OPEN_CLASS);
+    if (trigger) trigger.setAttribute('aria-expanded', 'true');
+    if (nameInput) nameInput.focus();
+    else dialog.focus();
+  }
+
+  function close() {
+    if (!isOpen()) return;
+    overlay.classList.remove(OPEN_CLASS);
+    Array.prototype.forEach.call(document.querySelectorAll('[data-tf-open]'), function (b) {
+      b.setAttribute('aria-expanded', 'false');
+    });
+    var target = (returnFocusTo && returnFocusTo !== document.body && returnFocusTo.isConnected)
+      ? returnFocusTo
+      : dialog;
+    returnFocusTo = null;
+    editingCard = null;
+    target.focus();
+  }
+
+  document.addEventListener('click', function (event) {
+    var btn = event.target.closest ? event.target.closest('[data-tf-open]') : null;
+    if (!btn) return;
+    event.preventDefault();
+    open(btn.closest('.table-card'), btn);
+  });
+
+  /* The toolbar's Add Table button, which had no handler at all until now. */
+  var addBtn = document.querySelector('[data-tf-add]');
+  if (addBtn) {
+    addBtn.addEventListener('click', function (event) {
+      event.preventDefault();
+      openAdd(addBtn);
+    });
+  }
+
+  Array.prototype.forEach.call(overlay.querySelectorAll('[data-tf-close]'), function (btn) {
+    btn.addEventListener('click', close);
+  });
+
+  overlay.addEventListener('click', function (event) {
+    if (event.target === overlay) close();
+  });
+
+  overlay.addEventListener('keydown', function (event) {
+    if (!isOpen()) return;
+    if (event.key === 'Escape') { close(); return; }
+    if (event.key !== 'Tab') return;
+
+    var items = focusable();
+    if (!items.length) return;
+    var first = items[0], last = items[items.length - 1], active = document.activeElement;
+
+    if (event.shiftKey && (active === first || !dialog.contains(active))) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && (active === last || !dialog.contains(active))) {
+      event.preventDefault();
+      first.focus();
+    }
+  });
+
+  if (helpToggle) {
+    helpToggle.addEventListener('click', function () {
+      var on = helpToggle.getAttribute('aria-checked') === 'true';
+      form.classList.toggle('table-form__form--help', on);
+    });
+  }
+
+  if (seatsInput) seatsInput.addEventListener('input', syncWarning);
+
+  /* Sponsor lookup. Dropdown.js owns opening the panel and closing it on outside-click; this
+   * only adds the two things that are specific to an account picker — filtering, and committing
+   * the clicked account back onto the trigger. */
+  if (sponsorSearch && sponsorList) {
+    sponsorSearch.addEventListener('input', function () {
+      var q = sponsorSearch.value.trim().toLowerCase();
+      Array.prototype.forEach.call(sponsorList.querySelectorAll('li'), function (li) {
+        var label = (li.textContent || '').trim().toLowerCase();
+        li.hidden = q ? label.indexOf(q) === -1 : false;
+      });
+    });
+  }
+
+  if (sponsorList) {
+    sponsorList.addEventListener('click', function (event) {
+      var item = event.target.closest ? event.target.closest('.dropdown-item') : null;
+      if (!item || !sponsorValue) return;
+      sponsorValue.textContent = item.textContent.trim();
+    });
+  }
+
+  /* ── Save is NOT here ───────────────────────────────────────────────────────────────────────
+   * `seating-app.js` owns it. It listens for this form's submit on the DOCUMENT in the CAPTURE
+   * phase and calls `stopImmediatePropagation()`, so nothing bound to the form itself ever runs
+   * — verified by attaching a probe listener to the form and dispatching a submit: it was never
+   * reached.
+   *
+   * A `form.addEventListener('submit', ...)` handler DID live here until 2026-09-11: 354 lines
+   * that validated the fields and then saved by DOM surgery — rewriting the card's markup, the
+   * seat rows, and the plan totals via a regex over "13 tables · 124/148". seating-app.js's own
+   * comment describes retiring exactly that path when the model arrived, and the capture-phase
+   * interception did retire it; the code was simply never deleted.
+   *
+   * Dead code that LOOKS authoritative is worse than none: a seats-bounds fix was made here
+   * first and changed nothing in the browser, because the file that decides is the other one.
+   * So it is gone rather than left with a warning comment.
+   *
+   * What this module still owns is everything around the save: open/close, the focus trap, the
+   * help toggle, the sponsor lookup, the reduced-capacity warning, and the tier menu. */
+})();
+
+/* ── Seating toast ─────────────────────────────────────────────────────────────────────────
+ * Figma 1:6763 (table edited) / 1:6881 (table added), both raising SeatingToast Type=Success
+ * with an Undo.
+ *
+ * The COMPONENT owns none of this on purpose — seating-toast records that it ships "no show/hide,
+ * no auto-dismiss timer and no JS at all", and that who retires a toast was an open front-end
+ * decision. This module is that decision, made with the designer 2026-09-09:
+ *   - auto-dismiss after 4s (8s until 2026-09-09, shortened at the designer's request)
+ *   - the timer PAUSES while the pointer is over the pill or focus is inside it, so Undo cannot
+ *     time out from under someone reading the sentence or tabbing to the button (WCAG 2.2 SC 2.2.1
+ *     is the reason seating-toast flagged this in the first place)
+ *   - Esc dismisses
+ *   - one toast at a time; a new one replaces the old
+ *
+ * Driven by a `sp:toast` CustomEvent rather than a function on `window`, so the raising code does
+ * not need this module to have loaded first and nothing new lands on the global object.
+ */
+(function () {
+  'use strict';
+
+  if (window.__spToastReady) return;
+  window.__spToastReady = true;
+
+  /* 4s (designer, 2026-09-09; 8s before that). The pause-on-hover / pause-on-focus below is
+   * what keeps this defensible with an Undo attached — the timer stops the moment the pointer
+   * is over the pill or focus lands inside it, so a user reaching for Undo cannot have it time
+   * out from under them. Without that pause, 4s against a WCAG 2.2 SC 2.2.1 expectation would
+   * be the part to argue about. */
+  var DISMISS_MS = 4000;
+
+  var host = document.querySelector('[data-sp-toast-host]');
+  if (!host) return;
+
+  /* The live toast: { el, timer, undo }. Null when nothing is showing. */
+  var current = null;
+
+  function clear() {
+    if (!current) return;
+    if (current.timer) window.clearTimeout(current.timer);
+    if (current.el && current.el.parentNode) current.el.parentNode.removeChild(current.el);
+    current = null;
+  }
+
+  function pause() {
+    if (current && current.timer) {
+      window.clearTimeout(current.timer);
+      current.timer = null;
+    }
+  }
+
+  function resume() {
+    if (!current) return;
+    if (current.timer) window.clearTimeout(current.timer);
+    current.timer = window.setTimeout(clear, DISMISS_MS);
+  }
+
+  /* SeatingToast's two Types, and which icon each one carries. Read off the frames rather than
+   * assumed: the create and edit toasts (1:6881 / 1:6763) place `Icon/24px/BadgeCheck`, and the
+   * DELETE toast (1:43089 / 1:44212) places `Icon/24px/TriangleAlert` with the error ring — a
+   * removal is reported as a warning, not a success. */
+  var TYPES = {
+    success: { modifier: 'seating-toast--success', icon: 'badge-check' },
+    error:   { modifier: 'seating-toast--error',   icon: 'triangle-alert' }
+  };
+
+  /* `parts` is an array of { text, strong } — the message is built as text nodes and <strong>
+   * runs rather than from an HTML string, because a table name is user input. Figma emphasises
+   * the subject AND the object ("**Table 13** added to **Main Ballroom.**"), which is why this
+   * takes a list rather than a single bold term. */
+  function show(parts, undo, type) {
+    clear();
+
+    var kind = TYPES[type] || TYPES.success;
+
+    var el = document.createElement('div');
+    el.className = 'seating-toast ' + kind.modifier;
+
+    var icon = document.createElement('i');
+    icon.className = 'seating-toast__icon';
+    icon.setAttribute('data-lucide', kind.icon);
+    icon.setAttribute('aria-hidden', 'true');
+    el.appendChild(icon);
+
+    var msg = document.createElement('p');
+    msg.className = 'seating-toast__message';
+    (parts || []).forEach(function (p) {
+      if (!p || !p.text) return;
+      if (p.strong) {
+        var strong = document.createElement('strong');
+        strong.textContent = p.text;
+        msg.appendChild(strong);
+      } else {
+        msg.appendChild(document.createTextNode(p.text));
+      }
+    });
+    el.appendChild(msg);
+
+    if (typeof undo === 'function') {
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'btn btn--secondary btn--xs seating-toast__cta';
+      btn.textContent = 'Undo';
+      btn.addEventListener('click', function () {
+        /* Read the handler BEFORE clearing — clear() nulls `current`. */
+        var fn = current && current.undo;
+        clear();
+        if (fn) fn();
+      });
+      el.appendChild(btn);
+    }
+
+    /* Bound on the PILL, not the host: `mouseenter` does not bubble, and the host is
+     * `pointer-events: none` so it never becomes the target itself. */
+    el.addEventListener('mouseenter', pause);
+    el.addEventListener('mouseleave', resume);
+    el.addEventListener('focusin', pause);
+    el.addEventListener('focusout', resume);
+
+    host.appendChild(el);
+    /* The icon ships as <i data-lucide> and createIcons() has already run for the page. */
+    if (window.lucide && typeof window.lucide.createIcons === 'function') {
+      window.lucide.createIcons();
+    }
+
+    current = { el: el, timer: null, undo: (typeof undo === 'function') ? undo : null };
+    resume();
+  }
+
+  document.addEventListener('keydown', function (event) {
+    if (event.key === 'Escape' && current) clear();
+  });
+
+  document.addEventListener('sp:toast', function (event) {
+    var detail = event.detail || {};
+    show(detail.parts, detail.undo, detail.type);
+  });
+})();
+
+/* ── Delete table ──────────────────────────────────────────────────────────────────────────
+ * Figma 1:12323 desktop / 1:44254 mobile. Deliberately parallel to the deletePlan IIFE above —
+ * same open/close contract, same focus trap, same data-driven copy — so a change to one is easy
+ * to mirror.
+ */
+(function () {
+  'use strict';
+
+  if (window.__deleteTableReady) return;
+  window.__deleteTableReady = true;
+
+  var OPEN_CLASS = 'modal-overlay--open';
+  var FOCUSABLE = [
+    'a[href]', 'button:not([disabled])', 'input:not([disabled])',
+    'select:not([disabled])', 'textarea:not([disabled])', '[tabindex]:not([tabindex="-1"])'
+  ].join(',');
+
+  var overlay = document.querySelector('[data-delete-table]');
+  if (!overlay) return;
+
+  var dialog = overlay.querySelector('[role="alertdialog"]');
+  var nameEl = overlay.querySelector('[data-dtb-name]');
+  var consequenceEl = overlay.querySelector('[data-dtb-consequence]');
+  var cancelBtn = overlay.querySelector('.btn--secondary[data-dtb-close]');
+  var returnFocusTo = null;
+  var deletingCard = null;
+
+  function isOpen() { return overlay.classList.contains(OPEN_CLASS); }
+
+  function focusable() {
+    return Array.prototype.filter.call(
+      dialog.querySelectorAll(FOCUSABLE),
+      function (el) { return el.offsetParent !== null; }
+    );
+  }
+
+  function plural(n, one, many) { return n === 1 ? one : many; }
+
+  /* "6 / 10 seated" -> { seated: 6, capacity: 10 }. Regex rather than positional parsing, the
+   * same reasoning as deletePlan: the separator and the trailing word are presentation. */
+  function readCounts(card) {
+    var el = card && card.querySelector('.table-card__count');
+    var m = el ? /(\d+)\s*\/\s*(\d+)/.exec(el.textContent) : null;
+    return m ? { seated: parseInt(m[1], 10), capacity: parseInt(m[2], 10) }
+             : { seated: null, capacity: null };
+  }
+
+  /* Data-driven, and the empty case is the one Figma does not draw: with nobody seated it SAYS
+   * so rather than rendering "0 seated people will be returned", which would promise a
+   * consequence that never happens (designer, 2026-09-09 — and the documented behaviour for
+   * seating-delete-table already said the dialog should say so rather than invent one).
+   *
+   * Note this differs from Delete Plan, which drops its people clause entirely when nobody is
+   * seated. Deliberate: a plan with no one seated still loses its tables, so it has a
+   * consequence left to state; an empty table has none, so the line has to carry the fact. */
+  function buildConsequence(counts) {
+    var frag = document.createDocumentFragment();
+
+    if (counts.seated === null) {
+      frag.appendChild(document.createTextNode(
+        'Anyone seated at this table will be returned to the Unassigned pool.'));
+      return frag;
+    }
+    if (counts.seated === 0) {
+      frag.appendChild(document.createTextNode('No one is seated at this table.'));
+      return frag;
+    }
+
+    var strong = document.createElement('strong');
+    strong.textContent = String(counts.seated);
+    frag.appendChild(strong);
+    frag.appendChild(document.createTextNode(
+      ' seated ' + plural(counts.seated, 'person', 'people') +
+      ' will be returned to the Unassigned pool.'));
+    return frag;
+  }
+
+  function open(card, trigger) {
+    if (isOpen()) return;
+    deletingCard = card;
+    returnFocusTo = trigger || document.activeElement;
+
+    var selectEl = card && card.querySelector('.table-card__select');
+    if (nameEl) nameEl.textContent = selectEl ? selectEl.textContent.trim() : 'this table';
+    if (consequenceEl) {
+      consequenceEl.textContent = '';
+      consequenceEl.appendChild(buildConsequence(readCounts(card)));
+    }
+
+    overlay.classList.add(OPEN_CLASS);
+    if (trigger) trigger.setAttribute('aria-expanded', 'true');
+    /* Cancel, not Delete — the destructive control should never be one Enter away from a dialog
+     * that has only just appeared. */
+    if (cancelBtn) cancelBtn.focus();
+    else dialog.focus();
+  }
+
+  function close(focusTarget) {
+    if (!isOpen()) return;
+    overlay.classList.remove(OPEN_CLASS);
+    Array.prototype.forEach.call(document.querySelectorAll('[data-dtb-open]'), function (b) {
+      b.setAttribute('aria-expanded', 'false');
+    });
+    var target = focusTarget ||
+      ((returnFocusTo && returnFocusTo !== document.body && returnFocusTo.isConnected)
+        ? returnFocusTo
+        : dialog);
+    returnFocusTo = null;
+    deletingCard = null;
+    /* `preventScroll`, because this close is the one that hands focus to a DIFFERENT element — a
+     * surviving table's delete button — rather than back to the trigger, whose card has just been
+     * removed. Focusing scrolls the target into view, which threw the page most of the way back
+     * up: measured, scrollTop 900 before deleting a table and 207 after, all of it from this line
+     * rather than from the re-render, which holds its position.
+     *
+     * The a11y intent is unchanged — focus still lands in the list, so a keyboard user carries on
+     * from a real control instead of being dropped to <body>. It just no longer drags the viewport
+     * with it, which for a pointer user who deleted a table two screens up was the whole problem. */
+    if (target) target.focus({ preventScroll: true });
+  }
+
+  /* Delegated, so a table added by the Table form is deletable without re-binding. */
+  document.addEventListener('click', function (event) {
+    var btn = event.target.closest ? event.target.closest('[data-dtb-open]') : null;
+    if (!btn) return;
+    event.preventDefault();
+    open(btn.closest('.table-card'), btn);
+  });
+
+  Array.prototype.forEach.call(overlay.querySelectorAll('[data-dtb-close]'), function (btn) {
+    btn.addEventListener('click', function () { close(); });
+  });
+
+  overlay.addEventListener('click', function (event) {
+    if (event.target === overlay) close();
+  });
+
+  overlay.addEventListener('keydown', function (event) {
+    if (!isOpen()) return;
+    if (event.key === 'Escape') { close(); return; }
+    if (event.key !== 'Tab') return;
+
+    var items = focusable();
+    if (!items.length) return;
+    var first = items[0], last = items[items.length - 1], active = document.activeElement;
+
+    if (event.shiftKey && (active === first || !dialog.contains(active))) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && (active === last || !dialog.contains(active))) {
+      event.preventDefault();
+      first.focus();
+    }
+  });
+
+  var confirmBtn = overlay.querySelector('[data-dtb-confirm]');
+  if (confirmBtn) {
+    confirmBtn.addEventListener('click', function () {
+      var card = deletingCard;
+      if (!card) { close(); return; }
+
+      var tableId = card.getAttribute('data-sp-table');
+
+      /* THE MODEL DELETES IT (2026-09-14). This used to do the whole thing by hand: remove the
+       * card, patch the plan totals with a regex over "13 tables · 124/148", clear or move the
+       * seat panel, and snapshot `outerHTML` for Undo. It did not work, and the way it failed is
+       * worth recording because everything LOOKED right — the toast fired every time.
+       *
+       * When the deleted table was the SELECTED one it moved the seat panel on by CLICKING the
+       * next card's select button. That click runs the delegated selection path, which calls
+       * `render()`, which repaints the grid from a model that still had the table. The card came
+       * back in the same frame it was removed in. Measured: the original node really was detached
+       * (`isConnected === false`) and one grid rebuild replaced it.
+       *
+       * So the dialog announces and `seating-app.js` owns it — the same division the plan delete
+       * and the Table form already use. It splices the table, moves the selection to a surviving
+       * one, re-derives every count (the occupants return to the pool by arithmetic) and repaints,
+       * and it raises the toast with an Undo that puts the table back in the model at its original
+       * index rather than re-inserting saved markup.
+       *
+       * `dispatchEvent` is synchronous, so the grid is already rebuilt on the next line and the
+       * focus lookup below reads the real survivors. */
+      if (tableId && window.SeatingData) {
+        document.dispatchEvent(new CustomEvent('seating-planner:table-deleted', {
+          bubbles: true, detail: { tableId: tableId }
+        }));
+      } else if (card.parentNode) {
+        /* No model on the page — the TableListing pattern demo. Nothing else would remove it. */
+        card.parentNode.removeChild(card);
+      }
+
+      /* Land focus on a surviving table's own delete button where there is one, so a keyboard
+       * user stays in the list rather than being dropped to <body> with the card gone. */
+      var host = document.querySelector('[data-sp-grid], .table-listing__grid');
+      var next = host ? host.querySelector('.table-card') : null;
+      var focusNext = next
+        ? (next.querySelector('[data-dtb-open]') || next.querySelector('.table-card__select'))
+        : document.querySelector('[data-tf-add]');
+
+      close(focusNext || null);
+    });
+  }
+})();
+
+/* ── Table types (TASK-342308) ─────────────────────────────────────────────────────────────
+ * Figma 1:43151 desktop / 1:44348 mobile. The lookup the Table form's "+ Manage table types"
+ * link has been pointing at nothing since that form was built.
+ *
+ * THE ROWS ARE THE MODEL, which is the documented shape for seating-table-types: there is no
+ * separate array, the DOM order is the sort order, and a row's name input is the tier's identity.
+ * Everything below reads the rows rather than a parallel copy that could drift from them.
+ *
+ * Live, with no Save — neither frame draws a footer, so each edit applies as it is made.
+ */
+(function () {
+  'use strict';
+
+  if (window.__tableTypesReady) return;
+  window.__tableTypesReady = true;
+
+  var OPEN_CLASS = 'modal-overlay--open';
+  var FOCUSABLE = [
+    'a[href]', 'button:not([disabled])', 'input:not([disabled])',
+    'select:not([disabled])', 'textarea:not([disabled])', '[tabindex]:not([tabindex="-1"])'
+  ].join(',');
+
+  var overlay = document.querySelector('[data-table-types]');
+  if (!overlay) return;
+
+  var dialog = overlay.querySelector('[role="dialog"]');
+  var list = overlay.querySelector('[data-tt-list]');
+  var addForm = overlay.querySelector('#table-types-add');
+  var newName = overlay.querySelector('[data-tt-new-name]');
+  var newColour = overlay.querySelector('#tt-new-colour');
+  var fallbackEl = overlay.querySelector('[data-tt-fallback]');
+  var returnFocusTo = null;
+
+  function isOpen() { return overlay.classList.contains(OPEN_CLASS); }
+
+  function focusable() {
+    return Array.prototype.filter.call(
+      dialog.querySelectorAll(FOCUSABLE),
+      function (el) { return el.offsetParent !== null; }
+    );
+  }
+
+  function rows() {
+    return Array.prototype.slice.call(overlay.querySelectorAll('[data-tt-row]'));
+  }
+
+  function nameOf(row) {
+    var input = row.querySelector('[data-tt-name]');
+    return input ? input.value.trim() : '';
+  }
+
+  /* The FIRST row is the fallback, whatever it is called. Standard's text is editable
+   * (designer, 2026-09-09), so hardcoding the word "Standard" in the removal message and the
+   * intro sentence would go stale the moment someone renamed it — hence the intro reads this
+   * back too. */
+  function fallbackName() {
+    var first = rows()[0];
+    return first ? (nameOf(first) || 'Standard') : 'Standard';
+  }
+
+  function syncFallbackLabel() {
+    if (fallbackEl) fallbackEl.textContent = fallbackName();
+  }
+
+  function toast(parts) {
+    document.dispatchEvent(new CustomEvent('sp:toast', {
+      detail: { type: 'error', parts: parts }
+    }));
+  }
+
+  /* Every table card that currently sits on `tier`. The tier lives on the card's dataset
+   * (`data-tf-tier`), written by the Table form — the cards in this template render no tier chip,
+   * so there is nothing else to match on. */
+  function cardsOnTier(tier) {
+    return Array.prototype.filter.call(
+      document.querySelectorAll('.table-card'),
+      function (c) { return (c.getAttribute('data-tf-tier') || 'Standard') === tier; }
+    );
+  }
+
+  /* The Table form's tier dropdown is rebuilt from these rows rather than kept as a second copy
+   * — the documented requirement, and the reason a rename does not orphan the form's options. */
+  function syncTierOptions() {
+    var menu = document.querySelector('#tf-tier ~ .sel__menu, [data-tf-field="tier"] .sel__menu');
+    if (!menu) return;
+    var current = document.querySelector('#tf-tier .sel__value');
+    var currentText = current ? current.textContent.trim() : '';
+    var names = rows().map(nameOf).filter(Boolean);
+
+    menu.innerHTML = '';
+    names.forEach(function (n) {
+      var li = document.createElement('li');
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'sel__menu-item';
+      btn.setAttribute('role', 'option');
+      btn.textContent = n;
+      if (n === currentText) {
+        btn.classList.add('sel__menu-item--selected');
+        btn.setAttribute('aria-selected', 'true');
+        var check = document.createElement('i');
+        check.setAttribute('data-lucide', 'check');
+        btn.appendChild(check);
+      }
+      li.appendChild(btn);
+      menu.appendChild(li);
+    });
+    /* If the selected tier no longer exists, fall the field back rather than leaving it naming a
+     * tier that has gone. */
+    if (current && names.indexOf(currentText) === -1) current.textContent = fallbackName();
+    if (window.lucide && typeof window.lucide.createIcons === 'function') window.lucide.createIcons();
+  }
+
+  function open(trigger) {
+    if (isOpen()) return;
+    returnFocusTo = trigger || document.activeElement;
+    syncFallbackLabel();
+    overlay.classList.add(OPEN_CLASS);
+    var first = overlay.querySelector('[data-tt-name]');
+    if (first) first.focus();
+    else dialog.focus();
+  }
+
+  function close() {
+    if (!isOpen()) return;
+    overlay.classList.remove(OPEN_CLASS);
+    var target = (returnFocusTo && returnFocusTo !== document.body && returnFocusTo.isConnected)
+      ? returnFocusTo
+      : dialog;
+    returnFocusTo = null;
+    syncTierOptions();
+    if (target) target.focus();
+  }
+
+  /* Opened from the Table form's link, and the form is CLOSED first: both frames draw Table types
+   * over the plain screen with no form behind it, and stacking two dialogs would trap focus in
+   * the wrong one. */
+  document.addEventListener('click', function (event) {
+    var link = event.target.closest ? event.target.closest('[data-tf-manage-types]') : null;
+    if (!link) return;
+    event.preventDefault();
+    var form = document.querySelector('[data-table-form]');
+    if (form) form.classList.remove(OPEN_CLASS);
+    open(link);
+  });
+
+  Array.prototype.forEach.call(overlay.querySelectorAll('[data-tt-close]'), function (btn) {
+    btn.addEventListener('click', close);
+  });
+
+  overlay.addEventListener('click', function (event) {
+    if (event.target === overlay) close();
+  });
+
+  overlay.addEventListener('keydown', function (event) {
+    if (!isOpen()) return;
+    if (event.key === 'Escape') { close(); return; }
+    if (event.key !== 'Tab') return;
+
+    var items = focusable();
+    if (!items.length) return;
+    var first = items[0], last = items[items.length - 1], active = document.activeElement;
+
+    if (event.shiftKey && (active === first || !dialog.contains(active))) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && (active === last || !dialog.contains(active))) {
+      event.preventDefault();
+      first.focus();
+    }
+  });
+
+  /* ── Rename ───────────────────────────────────────────────────────────────────────────
+   * A rename MIGRATES the tables on that tier so identity survives, which is the documented
+   * behaviour and the reason the previous value is stashed on focus: by the time `change` fires
+   * the input no longer knows what it used to say. */
+  overlay.addEventListener('focusin', function (event) {
+    var input = event.target.closest ? event.target.closest('[data-tt-name]') : null;
+    if (input) input.setAttribute('data-tt-was', input.value.trim());
+  });
+
+  overlay.addEventListener('change', function (event) {
+    var input = event.target.closest ? event.target.closest('[data-tt-name]') : null;
+    if (!input) return;
+    var was = input.getAttribute('data-tt-was') || '';
+    var now = input.value.trim();
+
+    if (!now) { input.value = was; return; }
+    if (now === was) return;
+
+    /* Duplicate labels are rejected with a toast — the documented rule, and necessary because
+     * the label IS the identity here: two tiers called "Gold" would be indistinguishable on a
+     * card's dataset. */
+    var clash = rows().some(function (r) {
+      return r !== input.closest('[data-tt-row]') && nameOf(r).toLowerCase() === now.toLowerCase();
+    });
+    if (clash) {
+      input.value = was;
+      toast([{ text: now, strong: true }, { text: ' is already a tier name.' }]);
+      return;
+    }
+
+    cardsOnTier(was).forEach(function (c) { c.setAttribute('data-tf-tier', now); });
+    input.setAttribute('data-tt-was', now);
+    syncFallbackLabel();
+    syncTierOptions();
+  });
+
+  /* ── Recolour ─────────────────────────────────────────────────────────────────────────
+   * ColorPickerInput's own demo script repaints the swatch; this only has to keep the hidden
+   * hex value in step, because that is what a consumer reads back.
+   *
+   * TODO(backend:SeatingPlanner): nothing on this screen renders a tier colour yet — the table
+   * cards here draw no TableType chip (see seating-table-grid), so a recolour is currently
+   * invisible outside this modal. Recorded rather than papered over. */
+  overlay.addEventListener('input', function (event) {
+    var native = event.target.closest ? event.target.closest('.color-picker-input__native') : null;
+    if (!native) return;
+    var wrap = native.closest('.color-picker-input');
+    if (!wrap) return;
+    var inner = wrap.querySelector('.color-picker-input__swatch-inner');
+    var value = wrap.querySelector('.color-picker-input__value');
+    if (inner) inner.style.backgroundColor = native.value;
+    if (value) value.textContent = native.value;
+  });
+
+  /* ── Remove ───────────────────────────────────────────────────────────────────────────── */
+  overlay.addEventListener('click', function (event) {
+    var btn = event.target.closest ? event.target.closest('[data-tt-remove]') : null;
+    if (!btn) return;
+    var row = btn.closest('[data-tt-row]');
+    if (!row) return;
+
+    var tier = nameOf(row);
+    var moved = cardsOnTier(tier);
+    var fallback = fallbackName();
+
+    moved.forEach(function (c) { c.setAttribute('data-tf-tier', fallback); });
+    row.parentNode.removeChild(row);
+    syncTierOptions();
+
+    /* Says how many moved — the documented behaviour, and the reason it names the fallback's
+     * CURRENT label rather than the literal "Standard". */
+    if (moved.length) {
+      toast([
+        { text: tier + ' ', strong: true },
+        { text: 'removed. ' },
+        { text: String(moved.length) + (moved.length === 1 ? ' table' : ' tables'), strong: true },
+        { text: ' moved to ' },
+        { text: fallback + '.', strong: true }
+      ]);
+    } else {
+      toast([{ text: tier + ' ', strong: true }, { text: 'removed. No tables were using it.' }]);
+    }
+  });
+
+  /* ── Add ──────────────────────────────────────────────────────────────────────────────── */
+  if (addForm) {
+    addForm.addEventListener('submit', function (event) {
+      event.preventDefault();
+      var name = newName ? newName.value.trim() : '';
+      if (!name) { if (newName) newName.focus(); return; }
+
+      var clash = rows().some(function (r) { return nameOf(r).toLowerCase() === name.toLowerCase(); });
+      if (clash) {
+        toast([{ text: name, strong: true }, { text: ' is already a tier name.' }]);
+        if (newName) newName.focus();
+        return;
+      }
+
+      var colour = newColour ? newColour.value : '#e5e9eb';
+      var row = document.createElement('div');
+      row.className = 'table-types__row';
+      row.setAttribute('data-tt-row', '');
+      row.innerHTML =
+        '<div class="color-picker-input color-picker-input--chip" data-tt-colour>' +
+          '<span class="color-picker-input__swatch"><span class="color-picker-input__swatch-inner"></span></span>' +
+          '<span class="color-picker-input__value"></span>' +
+          '<input type="color" class="color-picker-input__native">' +
+        '</div>' +
+        '<div class="input table-types__name">' +
+          '<div class="input__wrap">' +
+            '<input type="text" class="input__control" aria-label="Tier name" data-tt-name>' +
+          '</div>' +
+        '</div>' +
+        '<button type="button" class="table-types__remove" data-tt-remove>' +
+          '<i data-lucide="trash-2" aria-hidden="true"></i>' +
+        '</button>';
+
+      /* Values set as properties, not interpolated into the HTML above — a tier name is user
+       * input, so it goes through `value`/`textContent` and cannot inject markup. */
+      row.querySelector('.color-picker-input__swatch-inner').style.backgroundColor = colour;
+      row.querySelector('.color-picker-input__value').textContent = colour;
+      var nativeInput = row.querySelector('.color-picker-input__native');
+      nativeInput.value = colour;
+      nativeInput.setAttribute('aria-label', name + ' tier colour');
+      row.querySelector('[data-tt-name]').value = name;
+      row.querySelector('[data-tt-remove]').setAttribute('aria-label', 'Remove ' + name + ' tier');
+
+      list.appendChild(row);
+      if (window.lucide && typeof window.lucide.createIcons === 'function') window.lucide.createIcons();
+
+      if (newName) { newName.value = ''; newName.focus(); }
+      syncTierOptions();
+    });
+  }
+})();
+
+/* ── Copy plans to another event ───────────────────────────────────────────────────────────
+ * Figma 1:13357 desktop / 1:44578 mobile.
+ *
+ * Deliberately thin, because event-picker.js already owns the dialog's behaviour: the search
+ * filtering, the footer count, Escape, row selection and Cancel all come from the
+ * `data-event-picker` root. This module only opens it, keeps the intro sentence honest, and
+ * does the copy when a destination is chosen.
+ */
+(function () {
+  'use strict';
+
+  if (window.__copyPlansReady) return;
+  window.__copyPlansReady = true;
+
+  var OPEN_CLASS = 'modal-overlay--open';
+
+  var overlay = document.querySelector('[data-copy-plans]');
+  if (!overlay) return;
+
+  var dialog = overlay.querySelector('[role="dialog"]');
+  var countEl = overlay.querySelector('[data-cp-count]');
+  var sourceEl = overlay.querySelector('[data-cp-source]');
+  var returnFocusTo = null;
+
+  function isOpen() { return overlay.classList.contains(OPEN_CLASS); }
+
+  function plural(n, one, many) { return n === 1 ? one : many; }
+
+  /* Read off the page rather than hardcoded, which is the documented requirement: the sentence
+   * cannot then disagree with the header it sits under, and it follows a plan being added or
+   * deleted without anyone remembering to update it. */
+  function syncIntro() {
+    var plans = document.querySelectorAll('.room-card').length;
+    if (countEl) countEl.textContent = plans + ' ' + plural(plans, 'plan', 'plans');
+
+    /* `.seating-header__title` and nothing else. A comma-separated fallback chain was wrong here:
+     * querySelector returns the first match in DOCUMENT ORDER, not the first selector that
+     * matches, so a broader selector earlier in the page would have won and named the wrong
+     * thing. There are two of these titles, one per header section, and both carry the same
+     * event. */
+    var title = document.querySelector('.seating-header__title');
+    if (sourceEl && title && title.textContent.trim()) {
+      sourceEl.textContent = title.textContent.trim();
+    }
+  }
+
+  function open(trigger) {
+    if (isOpen()) return;
+    returnFocusTo = trigger || document.activeElement;
+    syncIntro();
+    overlay.classList.add(OPEN_CLASS);
+    var search = overlay.querySelector('[data-ep-search]');
+    if (search) search.focus();
+    else if (dialog) dialog.focus();
+  }
+
+  function close() {
+    if (!isOpen()) return;
+    overlay.classList.remove(OPEN_CLASS);
+    var target = (returnFocusTo && returnFocusTo !== document.body && returnFocusTo.isConnected)
+      ? returnFocusTo
+      : dialog;
+    returnFocusTo = null;
+    if (target) target.focus();
+  }
+
+  /* Delegated: there are two Copy Plans buttons in the header, one per section, and both were
+   * unwired. */
+  document.addEventListener('click', function (event) {
+    var btn = event.target.closest ? event.target.closest('[data-cp-open]') : null;
+    if (!btn) return;
+    event.preventDefault();
+    open(btn);
+  });
+
+  overlay.addEventListener('click', function (event) {
+    if (event.target === overlay) close();
+  });
+
+  /* event-picker.js raises both of these on the dialog root, and they bubble to this overlay.
+   * The Select-an-event glue listens on ITS own overlay, so neither dialog hears the other. */
+  overlay.addEventListener('event-picker:close', close);
+
+  overlay.addEventListener('event-picker:select', function (event) {
+    var detail = event.detail || {};
+    var name = detail.name || 'that event';
+
+    var plans = document.querySelectorAll('.room-card').length;
+
+    /* Bump the destination row's plan count — the documented behaviour. The count is the number
+     * of plans that event now has, so it is read, added to and rewritten rather than incremented
+     * by one: copying two plans moves it by two. */
+    var row = overlay.querySelector('[data-ep-event][data-id="' + (detail.id || '') + '"]');
+    var planEl = row && row.querySelector('[data-cp-plans]');
+    if (planEl) {
+      var before = parseInt(planEl.getAttribute('data-cp-plans'), 10) || 0;
+      var after = before + plans;
+      planEl.setAttribute('data-cp-plans', String(after));
+      /* The icon is the first child and must survive, so only the trailing text node is
+       * rewritten — `textContent =` here would delete the <i>. */
+      planEl.lastChild.textContent = after + ' ' + plural(after, 'plan', 'plans');
+    }
+
+    close();
+
+    /* TODO(backend:SeatingPlanner): DOM-only — see seating-copy-plans, which asks for the cloned
+     * SeatingPlan + Table rows to be inserted under the target event in ONE transaction with
+     * TableSeat occupants left EMPTY: tables, capacities, types and sponsors carried, attendees
+     * not. Nothing here creates anything; it reports what a copy would do. */
+    document.dispatchEvent(new CustomEvent('sp:toast', {
+      detail: {
+        type: 'success',
+        parts: [
+          { text: plans + ' ' + plural(plans, 'plan', 'plans') + ' ', strong: true },
+          { text: 'copied to ' },
+          { text: name + '.', strong: true }
+        ]
+      }
+    }));
+  });
+})();
+
+/* ── Export the plan (TASK-342305) ──────────────────────────────────────────────────────────
+ * Figma 1:32273 / 1:43681 (format menu), 1:14741 / 1:45146 (PDF preview),
+ * 1:17021 / 1:46486 (CSV preview).
+ *
+ * THE PREVIEW FOLLOWS THE FORMAT: PDF previews as the document it will produce, CSV and .xlsx
+ * as the six columns they will contain. Showing a document preview for a spreadsheet would
+ * misrepresent the file.
+ *
+ * Both bodies are BUILT FROM THE PAGE at open time rather than authored in the markup, so the
+ * preview cannot claim something the plan does not say. Add a table, delete one, or unseat
+ * somebody and the counts, the meta line and the row set all follow.
+ */
+(function () {
+  'use strict';
+
+  if (window.__seatingExportReady) return;
+  window.__seatingExportReady = true;
+
+  var OPEN_CLASS = 'modal-overlay--open';
+
+  var overlay = document.querySelector('[data-export-preview]');
+  if (!overlay) return;
+
+  var dialog   = overlay.querySelector('[role="dialog"]');
+  var titleEl  = overlay.querySelector('[data-xp-title]');
+  var tablesEl = overlay.querySelector('[data-xp-tables]');
+  var seatedEl = overlay.querySelector('[data-xp-seated]');
+  var docEl    = overlay.querySelector('[data-xp-doc]');
+  var docTitle = overlay.querySelector('[data-xp-doc-title]');
+  var docMeta  = overlay.querySelector('[data-xp-doc-meta]');
+  var rowsEl   = overlay.querySelector('[data-xp-rows]');
+  var dlBtn    = overlay.querySelector('[data-xp-download]');
+
+  var panels = {
+    doc:   overlay.querySelector('[data-xp-panel="doc"]'),
+    table: overlay.querySelector('[data-xp-panel="table"]')
+  };
+
+  /* Only two previews are drawn: "Preview — PDF export" and "Preview — CSV export". Excel has a
+   * menu row but no frame of its own, because the brief has it previewing as the same six
+   * columns as CSV — so it reuses that body, and its title and button follow the same
+   * "Preview — <format> export" / "Download <format>" pattern. Extrapolated, and flagged.
+   *
+   * `real` marks the one format this front end can genuinely produce. */
+  var FORMATS = {
+    pdf:  { title: 'Preview — PDF export',   cta: 'Download PDF',   panel: 'doc',   real: false },
+    xlsx: { title: 'Preview — Excel export', cta: 'Download Excel', panel: 'table', real: false },
+    csv:  { title: 'Preview — CSV export',   cta: 'Download CSV',   panel: 'table', real: true }
+  };
+
+  var COLUMNS = ['Table', 'Type', 'Seat', 'Name', 'Company', 'Role'];
+
+  var format = 'pdf';
+  var returnFocusTo = null;
+  var lastPlan = null;
+
+  function isOpen() { return overlay.classList.contains(OPEN_CLASS); }
+  function plural(n, one, many) { return n === 1 ? one : many; }
+  function text(el) { return el ? el.textContent.replace(/\s+/g, ' ').trim() : ''; }
+  function each(list, fn) { Array.prototype.forEach.call(list, fn); }
+
+  /* ── Reading the plan off the page ─────────────────────────────────────────────────────── */
+
+  /* `[data-sp-grid]` and nothing broader. `.table-card` matches 200 times in this document —
+   * every capture state and every other panel carries cards — so an unscoped query would export
+   * a plan assembled out of the screenshots further down the page. */
+  function tableCards() {
+    var grid = document.querySelector('[data-sp-grid]');
+    return grid ? Array.prototype.slice.call(grid.querySelectorAll('.table-card')) : [];
+  }
+
+  /* "6 / 10 seated" -> { seated: 6, capacity: 10 } */
+  function readCount(card) {
+    var m = text(card.querySelector('.table-card__count')).match(/(\d+)\s*\/\s*(\d+)/);
+    return m ? { seated: +m[1], capacity: +m[2] } : { seated: 0, capacity: 0 };
+  }
+
+  /* The legend is the only per-role breakdown a card carries ("Attendee (2)", "Empty (4)").
+   * Empty is dropped: it counts what is deliberately NOT in the file. */
+  function readRoles(card) {
+    var out = [];
+    each(card.querySelectorAll('.table-card__legend-item'), function (item) {
+      var m = text(item).match(/^(.*?)\s*\((\d+)\)$/);
+      if (!m) return;
+      var role = m[1].trim();
+      if (/^empty$/i.test(role)) return;
+      out.push({ role: role, count: +m[2] });
+    });
+    return out;
+  }
+
+  /* Named occupants exist for exactly ONE table — whichever the detail panel is showing. There
+   * is no occupant model behind this screen; the seat rows are markup. Nothing else can be
+   * named without inventing people, so nothing else is. See seating-export-occupant-coverage. */
+  function readDetailOccupants() {
+    var seats = document.querySelector('.table-detail__seats');
+    var forTable = text(document.querySelector('[data-sp-detail-name]'));
+    if (!seats || !forTable) return null;
+
+    var rows = [];
+    each(seats.querySelectorAll('.attendee-card'), function (row) {
+      /* An empty seat is not a row — the whole point of seating-export-empty-seats. */
+      if (row.classList.contains('attendee-card--empty')) return;
+      rows.push({
+        seat:    text(row.querySelector('.attendee-card__seat')),
+        name:    text(row.querySelector('.attendee-card__name')),
+        company: text(row.querySelector('.attendee-card__company')),
+        role:    text(row.querySelector('.attendee-card__role'))
+      });
+    });
+    return { table: forTable, rows: rows };
+  }
+
+  function readPlan() {
+    var detail = readDetailOccupants();
+    var seated = 0;
+    var capacity = 0;
+
+    var tables = tableCards().map(function (card) {
+      var name = text(card.querySelector('.table-card__select')) ||
+                 text(card.querySelector('.table-card__name'));
+      var count = readCount(card);
+      var roles = readRoles(card);
+      var occupants = (detail && detail.table === name) ? detail.rows : null;
+
+      /* A seated table whose people are not in the DOM still contributes its seats, carrying the
+       * role the legend gives and leaving the person blank — better than dropping seats out of a
+       * file that says it holds every one of them. */
+      if (!occupants && count.seated > 0) {
+        occupants = [];
+        var seat = 1;
+        roles.forEach(function (r) {
+          for (var i = 0; i < r.count; i++) {
+            occupants.push({ seat: String(seat++), name: '—', company: '—', role: r.role });
+          }
+        });
+      }
+
+      seated += count.seated;
+      capacity += count.capacity;
+
+      return {
+        name: name,
+        seated: count.seated,
+        capacity: count.capacity,
+        /* No source. The cards draw no TableType chip on this screen, so neither the CSV's TYPE
+         * column nor the document heading's type label has anything to read. Figma's own
+         * Table 11 heading is drawn exactly this way — "Table 11 0/10", no type — so the
+         * untyped presentation is a state the design already covers. Tracked as
+         * seating-export-table-type. */
+        type: text(card.querySelector('.table-card__type')),
+        occupants: occupants || []
+      };
+    });
+
+    return {
+      event:  text(document.querySelector('.seating-header__title')),
+      plan:   text(document.querySelector('.seating-header__room-name')),
+      /* Figma's meta names two places ("Main Ballroom · Great Room") — a plan and the room it
+       * sits in. This screen models one venue, on the header's map-pin meta item, so that is
+       * what the second slot carries. Flagged: it is a venue, not a room. */
+      venue:  text(document.querySelector('.seating-header__meta-item:last-child')),
+      tables: tables,
+      seated: seated,
+      capacity: capacity
+    };
+  }
+
+  /* ── The document preview (PDF) ────────────────────────────────────────────────────────── */
+
+  function pad(n) { return n < 10 ? '0' + n : String(n); }
+
+  /* dd/mm/yyyy, as the frame draws it ("generated 30/07/2026"). Generated now, on purpose: the
+   * line is a claim about when this document was produced. */
+  function today() {
+    var d = new Date();
+    return pad(d.getDate()) + '/' + pad(d.getMonth() + 1) + '/' + d.getFullYear();
+  }
+
+  function buildDoc(plan) {
+    docTitle.textContent = plan.event;
+
+    var where = [plan.plan, plan.venue].filter(Boolean).join(' · ');
+    docMeta.textContent = 'Seating plan: ' + where + ' · ' +
+      plan.seated + '/' + plan.capacity + ' seated · generated ' + today();
+
+    /* Everything after the meta line is rebuilt, so re-opening never stacks two documents. */
+    while (docMeta.nextSibling) docEl.removeChild(docMeta.nextSibling);
+
+    plan.tables.forEach(function (t) {
+      var heading = document.createElement('p');
+      heading.className = 'export-preview__doc-heading';
+      heading.appendChild(document.createTextNode(t.name));
+
+      var trail = document.createElement('span');
+      /* The type prefix only when there is one to show — otherwise the occupancy alone, which
+       * is how Figma draws an untyped table. */
+      trail.textContent = ' ' + (t.type ? t.type + ' · ' : '') + t.seated + '/' + t.capacity;
+      heading.appendChild(trail);
+      docEl.appendChild(heading);
+
+      if (!t.occupants.length) {
+        var empty = document.createElement('p');
+        empty.className = 'export-preview__doc-empty';
+        empty.textContent = 'No one seated at this table yet.';
+        docEl.appendChild(empty);
+        return;
+      }
+
+      var list = document.createElement('ol');
+      list.className = 'export-preview__doc-list';
+      t.occupants.forEach(function (o) {
+        var li = document.createElement('li');
+        li.appendChild(document.createTextNode(
+          o.name + (o.company ? ' — ' + o.company : '') + ' '
+        ));
+        var role = document.createElement('span');
+        role.textContent = '[' + o.role + ']';
+        li.appendChild(role);
+        list.appendChild(li);
+      });
+      docEl.appendChild(list);
+    });
+  }
+
+  /* ── The table preview (CSV / .xlsx) ───────────────────────────────────────────────────── */
+
+  /* One row per SEATED seat, which is the row set the file will hold. A table with nobody seated
+   * contributes nothing here — it appears in the PDF document, with its own line, but a
+   * spreadsheet row for an empty table would be a row about nobody. */
+  function planRows(plan) {
+    var rows = [];
+    plan.tables.forEach(function (t) {
+      t.occupants.forEach(function (o) {
+        rows.push([t.name, t.type || '—', o.seat, o.name, o.company, o.role]);
+      });
+    });
+    return rows;
+  }
+
+  function buildTable(plan) {
+    rowsEl.textContent = '';
+    planRows(plan).forEach(function (cells) {
+      var tr = document.createElement('tr');
+      cells.forEach(function (value) {
+        var td = document.createElement('td');
+        td.textContent = value;
+        tr.appendChild(td);
+      });
+      rowsEl.appendChild(tr);
+    });
+  }
+
+  /* ── Download ──────────────────────────────────────────────────────────────────────────── */
+
+  /* RFC 4180 quoting: double the quotes, and wrap any field carrying a comma, a quote or a
+   * newline. Skipping this is how an export quietly corrupts every row after a company name
+   * with a comma in it. */
+  function csvField(value) {
+    var s = String(value == null ? '' : value);
+    return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  }
+
+  function csvText(plan) {
+    return [COLUMNS].concat(planRows(plan))
+      .map(function (row) { return row.map(csvField).join(','); })
+      .join('\r\n');
+  }
+
+  function slug(s) {
+    return (s || 'seating-plan').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  }
+
+  function toast(parts, type) {
+    document.dispatchEvent(new CustomEvent('sp:toast', {
+      detail: { parts: parts, type: type }
+    }));
+  }
+
+  function download() {
+    var plan = lastPlan || readPlan();
+    var spec = FORMATS[format];
+
+    if (!spec.real) {
+      /* Said out loud rather than downloading something fake. PDF and .xlsx need a server-side
+       * generator, and all three formats must come from the same query or they will disagree —
+       * see seating-export. */
+      toast([
+        { text: spec.cta.replace('Download ', '') + ' export', strong: true },
+        { text: ' is generated on the server — not wired up in this front end yet.' }
+      ], 'error');
+      return;
+    }
+
+    var blob = new Blob([csvText(plan)], { type: 'text/csv;charset=utf-8' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = slug(plan.plan) + '-seating.csv';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+
+    var rows = planRows(plan).length;
+    toast([
+      { text: 'CSV downloaded', strong: true },
+      { text: ' — ' + rows + ' ' + plural(rows, 'row', 'rows') + '.' }
+    ], 'success');
+  }
+
+  /* ── Open / close ──────────────────────────────────────────────────────────────────────── */
+
+  function open(next, trigger) {
+    var spec = FORMATS[next];
+    if (!spec) return;
+
+    format = next;
+    returnFocusTo = trigger || document.activeElement;
+    lastPlan = readPlan();
+
+    titleEl.textContent = spec.title;
+    dlBtn.textContent = spec.cta;
+
+    var tables = lastPlan.tables.length;
+    tablesEl.textContent = tables + ' ' + plural(tables, 'table', 'tables');
+    seatedEl.textContent = lastPlan.seated + ' ' + plural(lastPlan.seated, 'seated person', 'seated people');
+
+    if (spec.panel === 'doc') buildDoc(lastPlan);
+    else buildTable(lastPlan);
+
+    panels.doc.hidden = spec.panel !== 'doc';
+    panels.table.hidden = spec.panel !== 'table';
+
+    overlay.classList.add(OPEN_CLASS);
+    if (window.lucide && window.lucide.createIcons) window.lucide.createIcons();
+
+    /* The close button, not the scroll panel. Landing on the panel is tempting — the arrow keys
+     * would scroll the preview straight away — but the panel carries a `:focus-visible` ring and
+     * Figma draws that border plain grey, so every mouse user opening the dialog risked a brand
+     * ring around the preview on a heuristic this code does not control. The panels keep
+     * `tabindex="0"`, so a keyboard user reaches the scroller with one Tab and gets the ring
+     * exactly when it is meant to show. */
+    var landing = overlay.querySelector('[data-xp-close]');
+    (landing || dialog).focus();
+  }
+
+  function close() {
+    if (!isOpen()) return;
+    overlay.classList.remove(OPEN_CLASS);
+    var target = (returnFocusTo && returnFocusTo !== document.body && returnFocusTo.isConnected)
+      ? returnFocusTo
+      : null;
+    returnFocusTo = null;
+    if (target) target.focus();
+  }
+
+  /* ── The split trigger ─────────────────────────────────────────────────────────────────── */
+
+  var root = document.querySelector('.seating-header__export');
+  var moreBtn = root && root.querySelector('.seating-header__export-more');
+  var labelBtn = root && root.querySelector('.seating-header__btn--export');
+
+  /* Below 767 SeatingHeader clips Export to a 32px icon and drops the chevron, so there is no
+   * second half left to open the menu — the icon button takes that job instead. The menu's PDF
+   * row is what makes the default format reachable there; it now shows at every width, so above
+   * 767 it simply duplicates what the label half does.
+   *
+   * Decided from RENDERED VISIBILITY, never `matchMedia`: the toolbar's width is set by the
+   * docked SidebarMenu and the ActionsMenu rail, not by the window, so a viewport query would be
+   * answering a question nobody asked (CLAUDE.md §4a). A ResizeObserver keeps the ARIA honest
+   * because the column can change width with no window resize at all. */
+  function syncMode() {
+    if (!root || !labelBtn) return;
+    var split = !!(moreBtn && moreBtn.getClientRects().length);
+    root.setAttribute('data-sp-export-mode', split ? 'split' : 'menu');
+    if (split) {
+      labelBtn.removeAttribute('aria-haspopup');
+      labelBtn.removeAttribute('aria-expanded');
+    } else {
+      labelBtn.setAttribute('aria-haspopup', 'menu');
+      labelBtn.setAttribute('aria-expanded', root.classList.contains('is-open') ? 'true' : 'false');
+    }
+  }
+
+  if (root) {
+    syncMode();
+
+    var header = root.closest('.seating-header');
+    if (header && window.ResizeObserver) new ResizeObserver(syncMode).observe(header);
+
+    /* Dropdown.js owns the open class and resets aria-expanded on the CHEVRON. When the icon
+     * button is standing in as the trigger, that reset lands on a hidden element, so mirror the
+     * state from the root instead of trying to intercept every way the panel can close. */
+    if (window.MutationObserver) {
+      new MutationObserver(syncMode).observe(root, {
+        attributes: true, attributeFilter: ['class']
+      });
+    }
+  }
+
+  document.addEventListener('click', function (event) {
+    if (!event.target.closest) return;
+
+    if (event.target.closest('[data-xp-close]')) { close(); return; }
+    if (event.target.closest('[data-xp-download]')) { download(); return; }
+
+    var btn = event.target.closest('[data-sp-export]');
+    if (!btn) return;
+
+    /* The icon button doubles as the menu trigger where the chevron is hidden. Checked on the
+     * live element rather than on a remembered breakpoint. */
+    if (btn === labelBtn && root && root.getAttribute('data-sp-export-mode') === 'menu') {
+      event.preventDefault();
+      root.classList.toggle('is-open');
+      syncMode();
+      return;
+    }
+
+    event.preventDefault();
+    open(btn.getAttribute('data-sp-export'), btn);
+  });
+
+  /* Click the scrim to dismiss, matching every other modal on this screen. */
+  overlay.addEventListener('click', function (event) {
+    if (event.target === overlay) close();
+  });
+
+  document.addEventListener('keydown', function (event) {
+    if (event.key === 'Escape' && isOpen()) { close(); }
+  });
+}());
+
+/* ── Room Layout (TASK-344760) ───────────────────────────────────────────────────────────────
+ * Figma 1:20655 / 1:49180 (Empty), 1:24161 / 1:53040 (Image), 1:27691 / 1:55622 (PDF).
+ *
+ * Attaches a floor plan to the PLAN, so switching plans switches the layout.
+ *
+ * SAVED vs DRAFT (designer, 2026-09-09). The dialog holds a draft, and the primary button reports
+ * what it will do rather than always meaning the same thing:
+ *
+ *   draft differs from saved  ->  "Save"                 commit, toast, close
+ *   nothing saved yet         ->  "Upload PDF / image"   open the picker
+ *   something saved           ->  "Replace"              open the picker
+ *
+ * So opening on an empty plan and picking a file turns the button into Save; opening on a plan
+ * that already has one shows Replace until you actually switch it. The consequence worth naming:
+ * **Cancel now discards**. It had nothing to undo when a pick committed immediately; now it has,
+ * so Cancel, the X, Escape and the scrim all drop the draft and leave the saved layout alone.
+ * Removing is a draft change too, for the same reason — an accidental trash is recoverable by
+ * cancelling instead of being instantly destructive.
+ *
+ * NOTHING LEAVES THE BROWSER. An image is read with FileReader and previewed as a data URL; a PDF
+ * gets an object URL so its Open link genuinely works. Object URLs are revoked when the item they
+ * belong to is dropped — on save-over, on discard, and on remove — but never while an item is
+ * still reachable as either the draft or the saved value. See seating-room-layout.
+ */
+(function () {
+  'use strict';
+
+  if (window.__roomLayoutReady) return;
+  window.__roomLayoutReady = true;
+
+  var OPEN_CLASS = 'modal-overlay--open';
+
+  var overlay = document.querySelector('[data-room-layout]');
+  if (!overlay) return;
+
+  var dialog   = overlay.querySelector('[role="dialog"]');
+  var planEl   = overlay.querySelector('[data-rl-plan]');
+  var input    = overlay.querySelector('[data-rl-input]');
+  var drop     = overlay.querySelector('[data-rl-drop]');
+  var imageEl  = overlay.querySelector('[data-rl-image]');
+  var imageNm  = overlay.querySelector('[data-rl-image-name]');
+  var pdfNm    = overlay.querySelector('[data-rl-pdf-name]');
+  var pdfMeta  = overlay.querySelector('[data-rl-pdf-meta]');
+  var pdfLink  = overlay.querySelector('[data-rl-file-open]');
+  var primary  = overlay.querySelector('[data-rl-primary]');
+
+  var panels = {
+    empty: overlay.querySelector('[data-rl-panel="empty"]'),
+    image: overlay.querySelector('[data-rl-panel="image"]'),
+    pdf:   overlay.querySelector('[data-rl-panel="pdf"]')
+  };
+
+  /* Committed attachments, keyed by plan name — which is what the dialog is titled with, so one
+   * entry per plan and switching plans genuinely switches the layout. */
+  var saved = {};
+  var draft = null;
+  var plan = '';
+  var returnFocusTo = null;
+
+  function isOpen() { return overlay.classList.contains(OPEN_CLASS); }
+  function text(el) { return el ? el.textContent.replace(/\s+/g, ' ').trim() : ''; }
+  function savedItem() { return saved[plan] || null; }
+
+  /* Reference identity is enough: every pick builds a fresh object, and a remove sets null. */
+  function isDirty() { return draft !== savedItem(); }
+
+  function currentPlan() {
+    return text(document.querySelector('.seating-header__room-name')) || 'This plan';
+  }
+
+  /* "256 KB" / "1.4 MB". Decimal KB, which is what a file manager shows. */
+  function formatSize(bytes) {
+    if (!bytes && bytes !== 0) return '';
+    if (bytes < 1000) return bytes + ' B';
+    if (bytes < 1000 * 1000) return Math.round(bytes / 1000) + ' KB';
+    return (bytes / (1000 * 1000)).toFixed(1) + ' MB';
+  }
+
+  function toast(parts, type) {
+    document.dispatchEvent(new CustomEvent('sp:toast', { detail: { parts: parts, type: type } }));
+  }
+
+  /* Only ever called on an item that is no longer reachable from `draft` or `saved`. */
+  function release(item) {
+    if (item && item.revoke) URL.revokeObjectURL(item.url);
+  }
+
+  /* ── Rendering ─────────────────────────────────────────────────────────────────────────── */
+
+  function render() {
+    var kind = draft ? draft.kind : 'empty';
+
+    panels.empty.hidden = kind !== 'empty';
+    panels.image.hidden = kind !== 'image';
+    panels.pdf.hidden   = kind !== 'pdf';
+
+    /* Three labels, one button — see the header comment. "Save" is not in Figma: its frames are
+     * static, so they cannot show a pending state, and the two labels they DO draw are the two
+     * not-dirty cases. */
+    primary.textContent = isDirty() ? 'Save'
+      : (savedItem() ? 'Replace' : 'Upload PDF / image');
+
+    if (kind === 'image') {
+      imageEl.src = draft.url;
+      imageEl.alt = 'Floor plan for ' + plan;
+      imageNm.textContent = draft.name;
+      imageNm.title = draft.name;                  /* the row truncates; keep the full name reachable */
+    } else if (kind === 'pdf') {
+      pdfNm.textContent = draft.name;
+      pdfNm.title = draft.name;
+      pdfMeta.textContent = 'PDF · ' + formatSize(draft.size);
+      pdfLink.href = draft.url;
+      pdfLink.setAttribute('aria-label', 'Open ' + draft.name + ' in a new tab');
+    }
+  }
+
+  /* ── Accepting a file into the draft ───────────────────────────────────────────────────── */
+
+  function setDraft(item) {
+    /* Drop the outgoing draft unless it is the saved one, which Cancel still needs. */
+    if (draft && draft !== savedItem()) release(draft);
+    draft = item;
+    render();
+  }
+
+  function accept(file) {
+    if (!file) return;
+
+    var isImage = /^image\//.test(file.type);
+    var isPdf = file.type === 'application/pdf' || /\.pdf$/i.test(file.name);
+
+    /* Refused BY NAME, so the message says which file was rejected. Checked on the file rather
+     * than trusting `accept`, which a drag bypasses entirely. */
+    if (!isImage && !isPdf) {
+      toast([
+        { text: file.name, strong: true },
+        { text: ' isn’t a PDF or an image, so it can’t be used as a floor plan.' }
+      ], 'error');
+      return;
+    }
+
+    if (isImage) {
+      var reader = new FileReader();
+      reader.onload = function () {
+        setDraft({ kind: 'image', name: file.name, size: file.size, url: reader.result, revoke: false });
+      };
+      /* Read locally — this is what keeps the file in the browser. */
+      reader.readAsDataURL(file);
+    } else {
+      setDraft({
+        kind: 'pdf', name: file.name, size: file.size,
+        url: URL.createObjectURL(file), revoke: true
+      });
+    }
+  }
+
+  /* Removing is a DRAFT change, not an immediate destruction — so Cancel can undo it. */
+  function removeDraft() {
+    if (!draft) return;
+    setDraft(null);
+    if (input) input.focus();      /* focus would otherwise sit on a button that is now gone */
+  }
+
+  /* ── Commit / discard ──────────────────────────────────────────────────────────────────── */
+
+  function save() {
+    var previous = savedItem();
+    if (previous && previous !== draft) release(previous);
+
+    if (draft) saved[plan] = draft;
+    else delete saved[plan];
+
+    var parts = draft
+      ? [{ text: draft.name, strong: true }, { text: ' attached to ' + plan + '.' }]
+      : [{ text: 'Layout removed', strong: true }, { text: ' from ' + plan + '.' }];
+
+    close();
+    toast(parts, 'success');
+  }
+
+  function discard() {
+    if (draft && draft !== savedItem()) release(draft);
+    draft = savedItem();
+  }
+
+  /* ── Open / close ──────────────────────────────────────────────────────────────────────── */
+
+  function open(trigger) {
+    if (isOpen()) return;
+    returnFocusTo = trigger || document.activeElement;
+    plan = currentPlan();
+    if (planEl) planEl.textContent = plan;
+    draft = savedItem();
+    render();
+    overlay.classList.add(OPEN_CLASS);
+    if (window.lucide && window.lucide.createIcons) window.lucide.createIcons();
+    var closeBtn = overlay.querySelector('[data-rl-close]');
+    if (closeBtn) closeBtn.focus();
+  }
+
+  function close() {
+    if (!isOpen()) return;
+    overlay.classList.remove(OPEN_CLASS);
+    var target = (returnFocusTo && returnFocusTo !== document.body && returnFocusTo.isConnected)
+      ? returnFocusTo
+      : null;
+    returnFocusTo = null;
+    if (target) target.focus();
+  }
+
+  /* Every dismissal route drops the draft. */
+  function cancel() {
+    discard();
+    close();
+  }
+
+  /* ── Drag and drop ─────────────────────────────────────────────────────────────────────── */
+  /* The copy promises "or drag a file here", so the zone has to accept one. `--active` is the DS
+   * component's own drag-over modifier, not a new visual. */
+  if (drop) {
+    ['dragenter', 'dragover'].forEach(function (type) {
+      drop.addEventListener(type, function (event) {
+        event.preventDefault();
+        drop.classList.add('drag-drop--active');
+      });
+    });
+
+    ['dragleave', 'dragend'].forEach(function (type) {
+      drop.addEventListener(type, function () {
+        drop.classList.remove('drag-drop--active');
+      });
+    });
+
+    drop.addEventListener('drop', function (event) {
+      event.preventDefault();
+      drop.classList.remove('drag-drop--active');
+      var dt = event.dataTransfer;
+      if (dt && dt.files && dt.files.length) accept(dt.files[0]);
+    });
+  }
+
+  /* A drop anywhere else in the dialog must not make the browser navigate away from the app,
+   * which is what an unhandled file drop does. */
+  overlay.addEventListener('dragover', function (event) { event.preventDefault(); });
+  overlay.addEventListener('drop', function (event) { event.preventDefault(); });
+
+  if (input) {
+    input.addEventListener('change', function () {
+      if (input.files && input.files.length) accept(input.files[0]);
+      /* Cleared so re-picking the SAME file still fires `change`. */
+      input.value = '';
+    });
+  }
+
+  /* ── Events ────────────────────────────────────────────────────────────────────────────── */
+
+  document.addEventListener('click', function (event) {
+    if (!event.target.closest) return;
+
+    /* BOTH triggers: SeatingHeader shows the toolbar button above container 1200 and the overflow
+     * menu item below it, never both, so binding only one leaves the control dead at that width. */
+    var trigger = event.target.closest('[data-rl-open]');
+    if (trigger) { event.preventDefault(); open(trigger); return; }
+
+    if (!isOpen()) return;
+    if (event.target.closest('[data-rl-close]')) { cancel(); return; }
+    if (event.target.closest('[data-rl-remove]')) { removeDraft(); return; }
+
+    if (event.target.closest('[data-rl-primary]')) {
+      if (isDirty()) save();
+      else if (input) input.click();
+    }
+  });
+
+  overlay.addEventListener('click', function (event) {
+    if (event.target === overlay) cancel();
+  });
+
+  document.addEventListener('keydown', function (event) {
+    if (event.key === 'Escape' && isOpen()) cancel();
+  });
+}());

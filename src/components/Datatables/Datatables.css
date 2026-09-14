@@ -1,0 +1,450 @@
+/* Datatables component
+ * Figma node: 2562:8289 — Tier=Component
+ * Variants: Type (Pagination | Search) × Device (Desktop | Mobile)
+ *           × Overflow Content (Scroll | Trigger)
+ *
+ * Composes the production Table component (`.table` + `.table-wrap`)
+ * and adds toolbar / pagination footer / sortable headers / kebab-row-
+ * expand chrome around it. Mobile is responsive via @container (the
+ * .datatables is a container-type: inline-size context) — below 768px
+ * container width the chrome padding compacts to spacing-3. The Trigger
+ * overflow pattern (kebab to reveal hidden columns) is markup-driven and
+ * works at any viewport.
+ *
+ * Token namespace (added 2026-05-07): chrome uses the new
+ * `--ai-datatable-*` tokens (table-bg / table-header-bg /
+ * table-subheader-bg / table-footer-bg / table-expanded-bg /
+ * table-border) sourced from the Figma `components/global/datatable`
+ * subtree. Table cells inside Datatables are scoped via
+ * `.datatables .table` so the namespaced tokens apply without forcing
+ * the standalone Table component to use them.
+ */
+
+/* ── Outer container ─────────────────────────────────── */
+/* Uses the same chrome as .table-wrap (white bg, border, radius,
+ * overflow clip) but takes the additional toolbar + footer children.
+ * The inner <table> uses .table from the Table component. */
+
+.datatables {
+  background-color: var(--ai-datatable-table-bg);
+  border: 1px solid var(--ai-datatable-table-border);
+  border-radius: var(--ai-radius-md);
+  overflow: hidden;
+  container-type: inline-size;
+}
+
+/* Table chrome overrides when Table is composed inside Datatables.
+ * Table itself uses generic semantic tokens; here we scope it to the
+ * datatable namespace so the column-header bg and cell borders match
+ * the new Figma tokens (subheader-bg = white, border = #e2e2e3). */
+
+.datatables .table thead th {
+  background-color: var(--ai-datatable-table-subheader-bg);
+  border-bottom-color: var(--ai-datatable-table-border);
+}
+
+.datatables .table tbody td {
+  border-bottom-color: var(--ai-datatable-table-border);
+}
+
+/* Trigger variant: when the last <tr> is a paired (hidden) detail row,
+ * the visible .datatables__row above it would otherwise leave a border
+ * that doubles against the footer's top border. Strip it. */
+
+.datatables__row:has(+ .datatables__row-detail:last-child) > td {
+  border-bottom: 0;
+}
+
+/* Inner wrap that holds ONLY the <table>. Scroll lives here, not on
+ * the outer .datatables — so the toolbar above and pagination footer
+ * below stay fixed while the table content scrolls horizontally. */
+
+.datatables__body {
+  overflow-x: auto;
+}
+
+/* When the user wraps with .datatables--mobile-scroll we constrain to
+ * phone-frame width. Inner __body still handles the scroll.
+ * Mobile-Trigger does NOT use this — it shows fewer columns inside
+ * the same narrow frame and uses kebab expand instead of scroll. */
+
+.datatables--mobile-scroll {
+  max-width: 24rem;
+}
+
+.datatables--mobile-scroll .datatables__body .table {
+  width: max-content;
+  min-width: 100%;
+}
+
+.datatables--mobile-scroll .datatables__body .table thead th,
+.datatables--mobile-scroll .datatables__body .table tbody td {
+  white-space: nowrap;
+}
+
+/* ── Toolbar (top of container) ──────────────────────── */
+
+.datatables__toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ai-spacing-4);
+  padding: var(--ai-spacing-4) var(--ai-spacing-5);
+  background-color: var(--ai-datatable-table-header-bg);
+  border-bottom: 1px solid var(--ai-datatable-table-border);
+}
+
+.datatables__meta {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ai-spacing-2);
+  font-family: var(--ai-font-title);
+  font-size: var(--ai-font-fixed-xs);
+  font-weight: var(--ai-font-regular);
+  color: var(--ai-text-contrast);
+  white-space: nowrap;
+}
+
+.datatables__meta strong {
+  font-weight: var(--ai-font-bold);
+}
+
+.datatables__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--ai-spacing-3);
+}
+
+/* ── Page-size select (button styled as small select) ──
+ * Used on the Pagination type's toolbar. Native <select> does not
+ * render its value cleanly in Figma capture, so this is a button
+ * trigger. Real selection behaviour is left to the consumer. */
+
+.datatables__select {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ai-spacing-2);
+  height: var(--ai-spacing-8);
+  padding: 0 var(--ai-spacing-3);
+  background-color: var(--ai-datatable-table-bg);
+  border: 1px solid var(--ai-datatable-table-border);
+  border-radius: var(--ai-radius-md);
+  font-family: var(--ai-font-title);
+  font-size: var(--ai-font-fixed-xs);
+  font-weight: var(--ai-font-medium);
+  color: var(--ai-text-primary);
+  cursor: pointer;
+  transition: border-color var(--ai-transition-default);
+}
+
+.datatables__select:hover {
+  border-color: var(--ai-border-contrast);
+}
+
+.datatables__select [data-lucide] {
+  width: var(--ai-icon-size-sm);
+  height: var(--ai-icon-size-sm);
+  color: var(--ai-icon-contrast);
+}
+
+/* ── Search field (Search type, slots into toolbar) ── */
+
+.datatables__search {
+  flex: 1;
+  max-width: 18rem;
+  align-items: flex-end;
+}
+
+.datatables__search .input__wrap {
+  min-height: var(--ai-spacing-8);
+}
+
+/* ── Sortable column header ──────────────────────────── */
+/* Slots inside <th> in place of the bare text. Inherits the th's
+ * uppercase / weight / colour. */
+
+.datatables__sort {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ai-spacing-2);
+  background: transparent;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  text-transform: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+}
+
+.datatables__sort [data-lucide] {
+  width: var(--ai-icon-size-sm);
+  height: var(--ai-icon-size-sm);
+  color: var(--ai-icon-contrast);
+}
+
+.datatables__sort--active [data-lucide] {
+  color: var(--ai-text-primary);
+}
+
+/* ── Pagination footer ───────────────────────────────── */
+
+.datatables__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ai-spacing-3);
+  padding: var(--ai-spacing-3) var(--ai-spacing-5);
+  background-color: var(--ai-datatable-table-footer-bg);
+  border-top: 1px solid var(--ai-datatable-table-border);
+  font-family: var(--ai-font-title);
+  font-size: var(--ai-font-fixed-xs);
+  color: var(--ai-text-contrast);
+}
+
+.datatables__footer strong {
+  font-weight: var(--ai-font-bold);
+}
+
+.datatables__pagination {
+  display: inline-flex;
+  align-items: stretch;
+  background-color: var(--ai-datatable-table-bg);
+  border: 1px solid var(--ai-datatable-table-border);
+  border-radius: var(--ai-radius-md);
+  overflow: hidden;
+}
+
+.datatables__page-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: var(--ai-spacing-8);
+  height: var(--ai-spacing-8);
+  padding: 0 var(--ai-spacing-3);
+  background: transparent;
+  border: 0;
+  font-family: var(--ai-font-body);
+  font-size: var(--ai-font-fixed-xs);
+  color: var(--ai-text-primary);
+  cursor: pointer;
+  transition: background-color var(--ai-transition-default);
+}
+
+.datatables__page-btn:hover {
+  background-color: var(--ai-datatable-table-footer-bg);
+}
+
+.datatables__page-btn + .datatables__page-btn {
+  border-left: 1px solid var(--ai-datatable-table-border);
+}
+
+.datatables__page-btn--active {
+  background-color: var(--ai-datatable-table-border);
+  color: var(--ai-text-primary);
+  font-weight: var(--ai-font-bold);
+}
+
+.datatables__page-btn--active:hover {
+  background-color: var(--ai-datatable-table-border);
+}
+
+.datatables__page-btn [data-lucide] {
+  width: var(--ai-icon-size-sm);
+  height: var(--ai-icon-size-sm);
+}
+
+/* ── Kebab-row-expand pattern (Overflow Content=Trigger) ──
+ * Pure CSS via :has(:checked). Each row pair is:
+ *   <tr class="datatables__row">         visible (Product + Price + kebab)
+ *   <tr class="datatables__row-detail">  hidden by default; revealed when
+ *                                        prev row's kebab is :checked.
+ * The kebab is a <label> wrapping a hidden checkbox + dots icon. */
+
+.datatables__kebab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--ai-spacing-7);
+  height: var(--ai-spacing-7);
+  border-radius: var(--ai-radius-md);
+  cursor: pointer;
+  color: var(--ai-icon-contrast);
+  transition: background-color var(--ai-transition-default),
+              color var(--ai-transition-default);
+}
+
+.datatables__kebab:hover {
+  background-color: var(--ai-datatable-table-expanded-bg);
+  color: var(--ai-text-primary);
+}
+
+.datatables__kebab__input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+  width: 0;
+  height: 0;
+}
+
+.datatables__kebab [data-lucide] {
+  width: var(--ai-icon-size-sm);
+  height: var(--ai-icon-size-sm);
+}
+
+.datatables__kebab-cell {
+  width: var(--ai-spacing-7);
+  text-align: right;
+}
+
+/* Kebab column hugs its right-aligned dots icon — no left padding. Specificity
+   raised above the base `.table` cell padding (and the mobile compaction). */
+.datatables .table thead th.datatables__kebab-cell,
+.datatables .table tbody td.datatables__kebab-cell {
+  padding-left: 0;
+}
+
+.datatables__row-detail {
+  display: none;
+}
+
+.datatables__row:has(.datatables__kebab__input:checked) + .datatables__row-detail {
+  display: table-row;
+}
+
+.datatables__row:has(.datatables__kebab__input:checked) {
+  background-color: var(--ai-datatable-table-expanded-bg);
+}
+
+.datatables__row-detail__cell {
+  padding: 0;
+  background-color: var(--ai-datatable-table-expanded-bg);
+  border-bottom: 1px solid var(--ai-datatable-table-border);
+}
+
+.datatables__detail-list {
+  margin: 0;
+  padding: var(--ai-spacing-3) var(--ai-spacing-5);
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  column-gap: var(--ai-spacing-5);
+  row-gap: var(--ai-spacing-2);
+  font-size: var(--ai-font-fixed-xs);
+}
+
+.datatables__detail-list dt {
+  font-size: var(--ai-font-fixed-xxs);
+  font-weight: var(--ai-font-semibold);
+  color: var(--ai-text-contrast);
+  text-transform: uppercase;
+  letter-spacing: var(--ai-tracking-7);
+  align-self: center;
+}
+
+.datatables__detail-list dd {
+  margin: 0;
+  color: var(--ai-text-primary);
+}
+
+/* ── Mobile responsive (≤767px container width) ─────────
+ * Container-query based — the table compacts whenever its own width
+ * drops below 768px, not just when the viewport does. */
+
+@container (max-width: 767px) {
+  /* Trim toolbar gap and stack action labels behind icons */
+  .datatables__toolbar {
+    gap: var(--ai-spacing-2);
+  }
+
+  /* Compact padding below 768px container width: every element that uses
+   * spacing-5 / spacing-4 padding at desktop drops to a uniform
+   * spacing-3 (8px) on both axes. Covers the toolbar, footer, detail list,
+   * and the header/body cells (Table cell rules scoped to .datatables so
+   * the base Table component elsewhere is unaffected). */
+  .datatables__toolbar,
+  .datatables__footer,
+  .datatables__detail-list,
+  .datatables .table thead th,
+  .datatables .table tbody td {
+    padding: var(--ai-spacing-3) var(--ai-spacing-3);
+  }
+
+  /* Tight column: drops right padding so the column collapses toward its
+   * content, handing the freed width to its neighbour. Used on the Login
+   * column of the Whos Online · Trigger variant. Specificity is raised
+   * above the compaction rule's `.datatables .table tbody td`. */
+  .datatables .table thead th.datatables__col--tight,
+  .datatables .table tbody td.datatables__col--tight {
+    padding-right: 0;
+  }
+
+  /* Toolbar search fills the available space below 768px. At desktop the search uses
+   * `align-items: flex-end` (content-width, right-aligned); stretching it here lets it
+   * shrink and grow with a narrow toolbar instead.
+   *
+   * A companion `.input__wrap { max-width: none }` used to sit here, lifting the 192px
+   * cap Input's --sm size carried. That cap was removed from Input on 2026-08-25, so the
+   * override is gone as redundant. */
+  .datatables__search {
+    align-items: stretch;
+  }
+}
+
+/* ── Body cell content patterns (used by Whos Online variants) ──
+ * The Whos Online Type composes Avatar + Portraits in the USER cell,
+ * a tertiary Button in the ACCOUNT cell, and a Lucide fingerprint
+ * icon in the TOUCH cell. Classes live on the cell content, not the
+ * <td>, so consumers can opt into them per cell. */
+
+.datatables__user-cell {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: var(--ai-spacing-3);
+}
+
+.datatables__user-text {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ai-spacing-0);
+  min-width: 0;
+}
+
+.datatables__user-name,
+.datatables__user-role {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.datatables__user-name {
+  font-family: var(--ai-font-title);
+  font-weight: var(--ai-font-bold);
+  font-size: var(--ai-font-fixed-xs);
+  color: var(--ai-text-primary);
+  line-height: var(--ai-leading-sm);
+}
+
+.datatables__user-role {
+  font-family: var(--ai-font-body);
+  font-weight: var(--ai-font-medium);
+  font-size: var(--ai-font-fixed-xs);
+  color: var(--ai-text-contrast);
+  line-height: var(--ai-leading-sm);
+}
+
+/* Cell that centres a Lucide icon (e.g. fingerprint TOUCH column). */
+
+.datatables__icon-cell {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ai-icon-secondary);
+}
+
+.datatables__icon-cell [data-lucide] {
+  width: var(--ai-icon-size-md);
+  height: var(--ai-icon-size-md);
+}

@@ -1,0 +1,26 @@
+/* CC SidebarMenu composite (Tier=Pattern)
+ * Figma node: 4053:6183 — "SidebarMenu" frame; deliverables 4066:18918
+ * (Desktop) + 4066:18916 (Mobile).
+ *
+ * This is purely a LAYOUT pattern — it composes the Sidebar rail and the
+ * Menu panel into a single flex row. No styling of its own beyond the
+ * composition; all visuals come from Sidebar.css and Menu.css.
+ */
+
+.cc-sidebar-menu {
+  display: inline-flex;
+  align-items: stretch;
+  height: 100%;
+  font-family: var(--ai-font-body);
+  /* Positioning context for the hover-flyout menu (.cc-menu--floating). */
+  position: relative;
+}
+
+/* Right-edge drop shadow — only when a menu panel is docked open.
+ * Figma node 4167:4735 (SidebarMenu, light mode). The :has() selector
+ * lights up the shadow only while at least one `.cc-menu` panel is
+ * NOT [hidden]; rail-only state stays shadowless. Dark mode overrides
+ * the token to `none` in css/tokens-shadows.css. */
+.cc-sidebar-menu:has(.cc-menu:not([hidden])) {
+  box-shadow: var(--ai-shadow-cc-rail);
+}

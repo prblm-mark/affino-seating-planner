@@ -1,0 +1,462 @@
+/* Input component
+ * Figma node: 78:2016 — "Input"
+ * Sizes: Base (40px), sm (32px)
+ * States: Default, Hover, Active, Focus, Error
+ */
+
+/* ── Container ───────────────────────────────────────── */
+
+.input {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ai-spacing-3);             /* 8px */
+}
+
+/* ── Label ───────────────────────────────────────────── */
+
+.input__label {
+  display: block;
+  font-family: var(--ai-font-title);
+  font-size: var(--ai-font-fixed-xs);   /* 14px — title/xs */
+  font-weight: var(--ai-font-semibold); /* 600 */
+  line-height: var(--ai-leading-xs);     /* 16px */
+  color: var(--ai-text-primary);
+}
+
+/* ── Label row (optional back button + label) ────────── */
+/* Figma "show label back" (node 3033:5171): a Label Container that holds an
+ * optional back button to the left of the label. Wrap the label in this row
+ * only when the back button is present. */
+
+.input__label-row {
+  display: flex;
+  align-items: center;
+  gap: var(--ai-spacing-3);             /* 8px */
+}
+
+.input__label-row .input__label {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Back button — a scoped secondary icon button. Smaller than the shared Button
+ * component (radius-sm, 12px icon, 6px padding), so built inline here (Case B)
+ * reusing Button's secondary tokens rather than the .btn component. */
+.input__label-back {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--ai-spacing-1);
+  padding: var(--ai-spacing-2);          /* 6px */
+  flex-shrink: 0;
+  background-color: var(--ai-btn-secondary-bg);
+  border: 1px solid var(--ai-btn-secondary-border);
+  border-radius: var(--ai-radius-sm);
+  color: var(--ai-btn-secondary-text);
+  cursor: pointer;
+  transition: background-color var(--ai-transition-default),
+              border-color var(--ai-transition-default);
+}
+
+.input__label-back:hover {
+  background-color: var(--ai-btn-secondary-bg-hover);
+  border-color: var(--ai-btn-secondary-border-hover);
+}
+
+.input__label-back:active {
+  background-color: var(--ai-btn-secondary-bg-pressed);
+}
+
+.input__label-back [data-lucide] {
+  width: var(--ai-icon-size-xs);         /* 12px */
+  height: var(--ai-icon-size-xs);
+}
+
+/* ── Field wrapper ───────────────────────────────────── */
+
+.input__wrap {
+  display: flex;
+  align-items: center;
+  gap: var(--ai-spacing-3);             /* 8px */
+  min-height: var(--ai-spacing-8);      /* 40px */
+  padding: 0 var(--ai-spacing-4);       /* 0 12px */
+  background-color: var(--ai-surface-primary);
+  border: 1px solid var(--ai-border-secondary);
+  border-radius: var(--ai-radius-md);
+  transition: border-color var(--ai-transition-default),
+              box-shadow var(--ai-transition-default);
+}
+
+.input__wrap:hover {
+  border-color: var(--ai-border-brand);
+}
+
+.input__wrap:focus-within {
+  border-color: var(--ai-border-brand);
+  box-shadow: 0 0 0 1px var(--ai-surface-primary),
+              0 0 0 3px color-mix(in srgb, var(--ai-surface-brand-soft) 95%, transparent);
+  outline: none;
+}
+
+/* Light-mode focus ring is 70%; dark mode keeps the softer 30% (brand-soft is a
+   lighter blue in dark, so a strong ring reads as heavy). */
+[data-theme="dark"] .input__wrap:focus-within {
+  box-shadow: 0 0 0 1px var(--ai-surface-primary),
+              0 0 0 3px color-mix(in srgb, var(--ai-surface-brand-soft) 30%, transparent);
+}
+
+/* Suppress global :focus-visible outline from base.css on child elements */
+.input__control:focus-visible,
+.input__clear:focus-visible {
+  outline: none;
+}
+
+/* ── Icon ────────────────────────────────────────────── */
+
+.input__icon {
+  width: var(--ai-icon-size-sm);
+  height: var(--ai-icon-size-sm);
+  color: var(--ai-icon-contrast);
+  flex-shrink: 0;
+}
+
+/* ── Control (input element) ─────────────────────────── */
+
+.input__control {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  font-family: var(--ai-font-body);
+  font-size: var(--ai-font-fixed-xs);   /* 14px — body/xs */
+  font-weight: var(--ai-font-regular);  /* 400 */
+  line-height: var(--ai-leading-md);     /* 24px */
+  color: var(--ai-text-primary);
+}
+
+.input__control::placeholder {
+  color: var(--ai-text-contrast);       /* --text/contrast-2 resolved to --ai-text-contrast */
+}
+
+/* ── Clear button ────────────────────────────────────── */
+
+.input__clear {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: var(--ai-icon-contrast);
+  flex-shrink: 0;
+  line-height: 0;
+  visibility: hidden;
+}
+
+.input__wrap:has(.input__control:not(:placeholder-shown)) .input__clear {
+  visibility: visible;
+}
+
+.input__clear [data-lucide] {
+  width: var(--ai-icon-size-sm);
+  height: var(--ai-icon-size-sm);
+}
+
+/* ── Help text ───────────────────────────────────────── */
+
+.input__help {
+  /* base.css sets `p { margin: 0 0 var(--ai-spacing-5) }`, so this <p> inherited a 16px
+   * bottom margin that nothing here reset — adding 16px to the height of EVERY input that
+   * shows help or an error text, in every consumer. Found via the Seating Planner's
+   * create-plan modal, whose grid rows measured 104/104/120 against Figma's 88/88/104.
+   * Same bug class as Badge's <p> (2026-08-25): a component paragraph picking up the
+   * page-level margin because the component never zeroed it. */
+  margin: 0;
+  font-family: var(--ai-font-body);
+  font-size: var(--ai-font-fixed-xxs);  /* 12px */
+  font-weight: var(--ai-font-regular);  /* 400 */
+  line-height: var(--ai-leading-xs);     /* 16px */
+  color: var(--ai-text-secondary);
+}
+
+/* ── Action row ──────────────────────────────────────── */
+
+/* Input's FOURTH stack slot, below Help — Figma `3435:28465` inside `78:2017`.
+ *
+ * This file's figma-notes has recorded the slot since the Input build, as "hidden in every
+ * variant. Nothing to build until something is placed in it." The Seating Planner's Table form
+ * (Figma `3515:178044`) is the first design to place something in it: a "+ Manage table types"
+ * link under the Table type / tier field. Built here rather than scoped to that screen because
+ * the slot belongs to Input's own component set — designer call, 2026-08-29.
+ *
+ * Purely additive: no existing Input renders an action row, so every current consumer is
+ * untouched. The 8px gap to whatever sits above comes from `.input`'s own column gap, which is
+ * why there is no margin here — and why the row sits 8px below the HELP line when help is shown
+ * and 8px below the FIELD when it is not, matching Figma's tier field at 112px (help on) and
+ * 88px (help off).
+ *
+ * `align-self: flex-start` so the hit area is the label's width, not the full field width —
+ * Figma draws the row at 120px inside a 462px column, and a full-width invisible target next to
+ * a form field is a misclick waiting to happen.
+ *
+ * Deliberately NOT scoped to `.input`: the tier and shape fields are Selects (`.sel`), which
+ * Figma still models as Input instances with a chevron. Keeping the selector standalone lets the
+ * same row sit in a `.sel` column stack without a second class that would drift from this one. */
+.input__action {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: var(--ai-spacing-0-5);            /* 2px */
+  padding: 0;
+  background: none;
+  border: 0;
+  font-family: var(--ai-font-body);
+  font-size: var(--ai-font-fixed-4xs);   /* 11px */
+  font-weight: var(--ai-font-medium);
+  line-height: var(--ai-leading-xs);     /* 16px */
+  letter-spacing: 0.11px;                /* optical tracking from Figma — px exception */
+  font-feature-settings: 'case' 1;
+  color: var(--ai-text-brand);
+  white-space: nowrap;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.input__action:hover {
+  text-decoration: underline;
+}
+
+.input__action:focus-visible {
+  outline: 2px solid var(--ai-surface-brand);
+  outline-offset: 2px;
+  border-radius: var(--ai-radius-sm);
+}
+
+/* 12px, not the 16px an icon in a form usually gets: Figma places a 20px Plus component scaled
+ * to 12x12 (`Icon/20px/Plus` at w=12 h=12), and `--ai-icon-size-xs` is bound on the node. */
+.input__action [data-lucide],
+.input__action svg {
+  width: var(--ai-icon-size-xs);
+  height: var(--ai-icon-size-xs);
+  flex-shrink: 0;
+}
+
+/* ── Error state ─────────────────────────────────────── */
+
+.input--error .input__wrap {
+  border-color: var(--ai-border-error);
+}
+
+.input--error .input__wrap:hover {
+  border-color: var(--ai-border-error);
+}
+
+.input--error .input__wrap:focus-within {
+  border-color: var(--ai-border-error);
+  box-shadow: 0 0 0 1px var(--ai-surface-primary),
+              0 0 0 3px var(--ai-surface-error-soft); /* red ring, not blue */
+}
+
+.input--error .input__help {
+  color: var(--ai-text-error);
+}
+
+/* ── Size: sm ────────────────────────────────────────── */
+
+/* No max-width here. A `max-width: var(--ai-size-3)` (192px) lived on this rule until
+ * 2026-08-25 and was removed at the designer's direction: a SIZE modifier should govern
+ * height, padding and typography, not cap width. It had already been worked around in
+ * three places — Datatables lifted it in a media query, ControlScreen with an inline
+ * style, and Unassigned with a scoped override — and blocked TableListing's 320px search.
+ * Consumers that want a narrow small input set their own width. */
+.input--sm .input__wrap,
+.input__wrap.input--sm {
+  min-height: var(--ai-spacing-7);      /* 32px */
+  /* Figma binds `--ai-spacing-4` / `--ai-spacing-3` on the sm Field (78:2029). Both were
+   * wrong until 2026-08-28: padding was --ai-spacing-3 (8px) and gap --ai-spacing-2 (6px),
+   * introduced together in 93b1a45b with no Figma citation alongside a `max-width: 192px`
+   * that the designer has since removed as an invention. Same commit, same class of error —
+   * these two were simply not caught at the same time. 12px also matches the Base padding
+   * this file already uses, so the two sizes now differ only in height and typography. */
+  padding: 0 var(--ai-spacing-4);       /* 0 12px */
+  gap: var(--ai-spacing-3);              /* 8px */
+}
+
+/* ── Size: sm — typography ────────────────────────────
+ *
+ * Figma's Size axis steps the LABEL and the FIELD down a step, not just the box: 14px -> 13px
+ * on both, and the field's line-height 24px -> 16px. Verified on the sm nodes directly
+ * (label 78:2028, field text 78:2032) rather than through the variant root, because Code
+ * Connect intercepts `get_design_context` on the variant and returns this project's own
+ * snippet instead of the design — so the variant root cannot be used to audit itself.
+ *
+ * None of this was implemented until 2026-08-28: every `input--sm` rendered its label and
+ * field at the Base 14px. It went unnoticed because `--sm` is the size the Seating Planner
+ * uses at mobile, where 14px is close enough to look deliberate.
+ *
+ * The help text is NOT part of this step — Figma keeps `body/xxs` (12px) at both sizes, so
+ * there is deliberately no `.input--sm .input__help` rule here.
+ *
+ * One selector covers both markup patterns: `input--sm` on the container (label is a
+ * descendant) and on the wrap itself (Datatables' toolbars, which carry no label). */
+.input--sm .input__label {
+  font-size: var(--ai-font-fixed-2xs);  /* 13px */
+}
+
+.input--sm .input__control {
+  font-size: var(--ai-font-fixed-2xs);  /* 13px */
+  line-height: var(--ai-leading-xs);     /* 16px */
+}
+
+/* ── Stepper (number input with − / + buttons) ────────
+ *
+ * NO FIGMA NODE. Built 2026-08-27 from a Flowbite/Tailwind reference the designer supplied,
+ * so every value below is a MAPPING DECISION rather than a Figma binding — the same footing
+ * as FullBadge, which was also extracted from code. Consequently there is no `.figma.ts`
+ * entry for it: Code Connect needs a component to attach to. See Input.figma-notes.
+ *
+ * Built as a modifier rather than a new component (designer, 2026-08-27) so it inherits the
+ * five things Input already does correctly: the label, the help line, the error state
+ * (red border, red ring, red help), the `--sm` size, and the focus-within ring. A standalone
+ * component would have had to re-implement all five and keep them in sync by hand.
+ *
+ * Reference mapping — Flowbite's semantic names to ours:
+ *   bg-neutral-secondary-medium (buttons)  -> --ai-surface-secondary
+ *   hover:bg-neutral-tertiary-medium       -> --ai-surface-contrast
+ *   border-default-medium                  -> --ai-border-secondary
+ *   h-10 / px-3                            -> --ai-spacing-8 (a 40px square button)
+ *   w-4 h-4 icons                          -> --ai-icon-size-sm
+ *   text-sm, centred                       -> Input's own --ai-font-fixed-xs
+ *   max-w-[9rem]                           -> DROPPED; fluid instead (designer) — 144px
+ *                                             matches no token, and the control should fill
+ *                                             whatever column holds it.
+ *
+ * The reference tints the FIELD as well as the buttons. Here only the buttons are tinted and
+ * the field stays --ai-surface-primary (designer), so a stepper sitting beside a text Input
+ * or a Select does not read as a different species of control. */
+
+.input--stepper .input__wrap {
+  /* The buttons sit flush inside the wrap's border, so the wrap gives up its own padding
+   * and gap. `overflow: hidden` keeps the button fills inside the border radius. */
+  padding: 0;
+  gap: 0;
+  overflow: hidden;
+}
+
+.input__step {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  /* Stretch to the wrap's height rather than setting one, so the button tracks whatever size
+   * the wrap is — including `--sm` — with only the width needing a per-size rule.
+   * Measured 40x38: the wrap is 40 and the buttons sit INSIDE its 1px border. The reference
+   * computes the same way (h-10 inside a bordered container), so this is not a discrepancy. */
+  align-self: stretch;
+  inline-size: var(--ai-spacing-8);
+  padding: 0;
+  border: 0;
+  background-color: var(--ai-surface-secondary);
+  color: var(--ai-icon-primary);
+  cursor: pointer;
+  transition: background-color var(--ai-transition-default);
+}
+
+.input--sm .input__step {
+  inline-size: var(--ai-spacing-7);
+}
+
+/* Hairlines between each button and the field. 1px is the border-width exception. */
+.input__step--dec {
+  border-inline-end: 1px solid var(--ai-border-secondary);
+}
+
+.input__step--inc {
+  border-inline-start: 1px solid var(--ai-border-secondary);
+}
+
+.input__step [data-lucide],
+.input__step svg {
+  inline-size: var(--ai-icon-size-sm);
+  block-size: var(--ai-icon-size-sm);
+}
+
+.input__step:hover:not(:disabled) {
+  background-color: var(--ai-surface-contrast);
+}
+
+/* At a bound, the button is genuinely unavailable rather than merely styled that way —
+ * Input.js disables it, so it also leaves the tab order and reports itself to assistive tech. */
+/* Opacity alone, deliberately: there is no `--ai-icon-disabled` token, and referencing one
+ * with a fallback would read as though there were. */
+.input__step:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+/* Kept visible, NOT suppressed like `.input__control` and `.input__clear` above. The wrap's
+ * focus-within ring says "this control has focus" but not WHICH button, and a stepper has
+ * two — so an inset outline on the focused button is the only thing that tells a keyboard
+ * user whether they are about to increment or decrement. */
+.input__step:focus-visible {
+  outline: 2px solid var(--ai-surface-brand);
+  outline-offset: -2px;
+}
+
+.input--stepper .input__control {
+  text-align: center;
+  /* The Stepper keeps `--ai-leading-md` (24px) on its number at BOTH sizes — Figma binds it on
+   * the sm variant (3567:105368) exactly as on Base — whereas a plain Input's sm field steps
+   * down to `--ai-leading-xs`. So this re-asserts 24px against the `.input--sm .input__control`
+   * rule above. It relies on SOURCE ORDER, not specificity: both selectors are two classes, and
+   * this block is later in the file. Do not move the stepper block above the size block.
+   *
+   * The font-size is deliberately NOT re-asserted — 13px at sm is correct for the Stepper too. */
+  line-height: var(--ai-leading-md);     /* 24px */
+  /* Chrome derives a number input's intrinsic width from its `max` attribute's digit count,
+   * and with no `max` at all it falls back to a ~20-character default. That intrinsic width
+   * became the wrapper's MIN-CONTENT size, so a stepper billed as "fluid" was silently forcing
+   * a ~252px floor on its container — enough to blow a `1fr` grid column wide open (found in
+   * this component's own demo, 2026-08-27: the two rows without a `max` overflowed the card
+   * while the four with `max="12"` sat at 156px). `min-inline-size: 0` does NOT fix this; a
+   * zero `inline-size` does, dropping min-content 252 -> 86, and costs nothing at render time
+   * because `flex: 1` above grows the field back to fill the wrap. */
+  inline-size: 0;
+  /* The − / + buttons replace the native spinner, so it is hidden. This is the one place a
+   * spinner SHOULD go: keeping both would give the same control two different affordances. */
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+
+.input--stepper .input__control::-webkit-outer-spin-button,
+.input--stepper .input__control::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  appearance: none;
+  margin: 0;
+}
+
+/* The Stepper binds its help/error text to `--ai-font-fixed-3xs` where a plain Input's help binds
+ * `--ai-font-fixed-xxs` (via the `body/xxs` style). Both are 0.75rem / 12px today, in every mode,
+ * so this rule is visually inert — which is exactly the point of writing it: the designer
+ * confirmed on 2026-08-28 that the Stepper genuinely sits on the `3xs` ramp position, so if the
+ * ramp ever moves, `.input__help` renders the size each component asked for instead of silently
+ * inheriting the other's. Keeping the code honest about a same-value divergence is cheap; only
+ * discovering it after the ramp moves is not.
+ *
+ * Two 12px tokens is a deliberate feature of the ramp, not a duplicate to be tidied away:
+ * `docs/tokens-reference.md` records `xxs` as the one components use and `3xs` as the ramp
+ * position that happens to share the value. This is `3xs`'s first use in the codebase.
+ *
+ * No order dependency here, unlike the line-height re-assert above — two classes beats the
+ * one-class `.input__help`, so specificity settles it wherever this rule sits.
+ *
+ * Everything else on this element already agreed and needed no rule: family `--ai-font-body`,
+ * weight `--ai-font-regular`, `--ai-leading-xs`, and `--ai-text-secondary` / `--ai-text-error`.
+ * The family only agreed as of the same day — Figma had the Stepper's help and number on
+ * `--ai-font-title`, and the designer repointed every non-title element to `--ai-font-body`. */
+.input--stepper .input__help {
+  font-size: var(--ai-font-fixed-3xs);  /* 12px */
+}
+

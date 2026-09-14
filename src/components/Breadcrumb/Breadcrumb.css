@@ -1,0 +1,230 @@
+/* Breadcrumb component
+ * Figma node: 2580:11309 (frame mislabelled "Numbered List" in Figma — the
+ * variants are Default | Home Icon | Solid Background | Dropdown, all
+ * breadcrumb patterns).
+ *
+ * Single axis: Type. The component is a horizontal list of links/items
+ * separated by chevron-right icons; the last item is the current page.
+ */
+
+/* ── Base ─────────────────────────────────────────────── */
+
+.breadcrumb {
+  display: inline-block;
+  font-family: var(--ai-font-title);
+}
+
+.breadcrumb__list {
+  display: flex;
+  /* NOWRAP, changed from `wrap` 2026-08-28. Wrapping put the trail on two lines, and in the CC top
+   * nav that broke the bar: the 40px chrome grew to two rows at ~300px of column (screenshot from a
+   * 302px device). A breadcrumb has a fixed-height row to live in, so it has to give way by
+   * truncating rather than by growing. */
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: var(--ai-spacing-2);
+  /* Lets the list shrink below its content width, which is what makes the ellipsis reachable —
+   * without it a flex item never goes under min-content and the trail just overflows instead. */
+  min-inline-size: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* BLOCK, not inline-flex (changed 2026-08-28). The `<li>` is the ellipsis container, and that is
+ * the whole trick: `text-overflow` needs a BLOCK container overflowing inline content, and it does
+ * nothing on a flex box — a flex container's text becomes an anonymous flex item, which
+ * `text-overflow` cannot reach. Measured before the change: the link reported
+ * `display: flex` (an `inline-flex` flex-item is blockified), `overflow: hidden`,
+ * `text-overflow: ellipsis`, and clientW 40 against scrollW 42 — i.e. genuinely overflowing and
+ * still clipping FLUSH, with no ellipsis drawn.
+ *
+ * Vertical centring survives the change: `height` and `line-height` are both `--ai-leading-md`, so
+ * a single line of text sits centred without needing `align-items`. */
+.breadcrumb__item {
+  display: block;
+  height: var(--ai-leading-md);
+  font-size: var(--ai-font-fixed-xs);
+  line-height: var(--ai-leading-md);
+  /* Same reason as the list: each crumb must be allowed under its own min-content. */
+  min-inline-size: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* Chevrons never absorb the squeeze — they are 16px of meaning, and a half-clipped chevron reads
+ * as a rendering fault rather than as truncation. The text is what gives way. */
+.breadcrumb__separator {
+  flex-shrink: 0;
+}
+
+/* The current item needs nothing extra — its text is a direct child of the `<li>`, which is now the
+ * ellipsis container, so it truncates by inheritance. */
+
+/* Link items (clickable crumbs) */
+.breadcrumb__link {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ai-spacing-2);
+  color: var(--ai-text-secondary);
+  font-weight: var(--ai-font-medium);
+  text-decoration: none;
+  transition: color var(--ai-transition-default);
+}
+
+.breadcrumb__link:hover {
+  color: var(--ai-text-primary);
+}
+
+/* Items whose content is a FLEX CONTROL get their flex box back. The `<li>` became `display: block`
+ * so `text-overflow` could reach its text, but that also dropped `align-items: center` — and an
+ * inline-flex child in a block sits on the BASELINE, not centred. Measured: the home glyph came out
+ * miscentred in 3 places in the Breadcrumb demo.
+ *
+ * Scoped with `:has()` to exactly the two crumbs that hold a control rather than text, neither of
+ * which has anything to truncate: `--home` is icon-only, and the dropdown deliberately does not
+ * truncate (see below). Plain text crumbs keep the block box and the ellipsis. */
+.breadcrumb__item:has(.breadcrumb__link--home),
+.breadcrumb__item:has(.breadcrumb__dropdown) {
+  display: flex;
+  align-items: center;
+}
+
+/* A text-only link is INLINE, so its text is inline content of the `<li>` block above and the
+ * ellipsis reaches it. Links in this component are either text-only or icon-only — `--home` is the
+ * only icon variant and carries no text — so nothing needs both a flex box and truncation.
+ *
+ * `--home` therefore keeps the flex box it needs to centre its glyph. */
+.breadcrumb__link:not(.breadcrumb__link--home) {
+  display: inline;
+}
+
+/* The dropdown crumb does NOT truncate: it is a zone/site name at the head of the trail, it is the
+ * one crumb whose loss makes the rest ambiguous, and it needs its flex box for the chevron. It
+ * holds its width and the crumbs after it give way instead.
+ *
+ * `flex-shrink` has to go on the `<li>`, NOT on the button. The flex item of the list is the `<li>`;
+ * a `flex-shrink: 0` on the button inside it does nothing, because the button is not what the list
+ * is distributing space between. Measured with it on the button: the dropdown's `<li>` still
+ * reported `flex-shrink: 1` and was squashed to 36px against 102px of content, which clipped the
+ * 16px chevron clean off — the button held its own width and its container shrank underneath it.
+ *
+ * Also why the dropdown must not truncate rather than merely preferring not to: its text sits in a
+ * flex box, so `text-overflow` cannot reach it (same trap as the links, see `__item` above) and it
+ * would clip FLUSH rather than ellipsis. If a zone name ever needs truncating, wrap its text in a
+ * span at that point. */
+.breadcrumb__item:has(.breadcrumb__dropdown) {
+  flex-shrink: 0;
+}
+
+/* Icons inside a crumb hold their size — the home glyph and the dropdown chevron both carry
+ * meaning, and clipping either looks broken rather than truncated. */
+.breadcrumb__link [data-lucide],
+.breadcrumb__link svg,
+.breadcrumb__dropdown [data-lucide],
+.breadcrumb__dropdown svg {
+  flex-shrink: 0;
+}
+
+/* Current page (last item, non-clickable) */
+.breadcrumb__item--current {
+  color: var(--ai-text-primary);
+  font-weight: var(--ai-font-semibold);
+}
+
+/* Separator (chevron-right between items) */
+.breadcrumb__separator {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--ai-icon-size-sm);
+  height: var(--ai-icon-size-sm);
+  color: var(--ai-icon-contrast);
+}
+
+.breadcrumb__separator [data-lucide] {
+  width: var(--ai-icon-size-sm);
+  height: var(--ai-icon-size-sm);
+}
+
+/* Home icon link */
+.breadcrumb__link--home {
+  color: var(--ai-icon-secondary);
+}
+
+.breadcrumb__link--home [data-lucide] {
+  width: var(--ai-icon-size-sm);
+  height: var(--ai-icon-size-sm);
+}
+
+.breadcrumb__link--home:hover {
+  color: var(--ai-text-primary);
+}
+
+/* Dropdown trigger button (Type=Dropdown) — text + chevron-down */
+.breadcrumb__dropdown {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ai-spacing-2);
+  background: transparent;
+  border: 0;
+  padding: 0;
+  color: var(--ai-text-secondary);
+  font-family: inherit;
+  font-size: inherit;
+  font-weight: var(--ai-font-medium);
+  line-height: inherit;
+  cursor: pointer;
+  transition: color var(--ai-transition-default);
+}
+
+.breadcrumb__dropdown:hover {
+  color: var(--ai-text-primary);
+}
+
+.breadcrumb__dropdown [data-lucide] {
+  width: var(--ai-icon-size-sm);
+  height: var(--ai-icon-size-sm);
+}
+
+/* ── Type=Solid Background ────────────────────────────── */
+
+.breadcrumb--solid .breadcrumb__list {
+  background-color: var(--ai-surface-minimal);
+  border: 1px solid var(--ai-border-secondary);
+  border-radius: var(--ai-radius-md);
+  padding: var(--ai-spacing-3) var(--ai-spacing-5);
+}
+
+/* ── Focus ────────────────────────────────────────────── */
+/* Keyboard focus uses the global outline from base.css. */
+
+/* ── Below the sm breakpoint (640px) ────────────────────────────────────────
+ * Tighter gaps on small screens (designer, 2026-08-28): the list and the dropdown trigger both go
+ * from `--ai-spacing-2` (6px) to `--ai-spacing-1` (4px). 639px because `max-width` is inclusive and
+ * sm is 640 — the same value ControlHub's single-column block already uses.
+ *
+ * ANONYMOUS `@container`, deliberately. This component establishes no container of its own, so the
+ * query resolves to the nearest ancestor container — which in every CC consumer is
+ * `.cc-top-navigation`, and that IS the right signal: what matters is how much bar the trail has,
+ * not how wide the window is. The CC shell costs ~178px, so a viewport query would fire at the
+ * wrong moment and would miss the docked-sidebar case entirely.
+ *
+ * `container-type` was NOT added to `.breadcrumb` to make this a self-query. Its base `display` is
+ * `inline-block`, and inline-size containment makes an element's inline size independent of its
+ * contents — an `inline-block` would collapse to zero width. TopNavigation overrides it to
+ * `display: block; flex: 1 0 0`, so CC is safe, but the standalone demo is not, and the component
+ * should not depend on a consumer's override to keep its own width.
+ *
+ * Consequence for demos: a page with no container ancestor never fires this block. The demo
+ * establishes one itself, per CLAUDE.md §4a. */
+@container (max-width: 639px) {
+  .breadcrumb__list {
+    gap: var(--ai-spacing-1);
+  }
+
+  .breadcrumb__dropdown {
+    gap: var(--ai-spacing-1);
+  }
+}

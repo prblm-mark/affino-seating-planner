@@ -1,0 +1,1001 @@
+/* SeatingHeader — the Seating Planner's event bar, room selector and toolbar
+ * Figma: Lus07xi8pPXLN87sQIyrEt node 3474:90519 (Tier=Pattern x Type x Device, 4 variants)
+ *
+ * Assumes base.css + tokens.css are loaded by the page.
+ *
+ * Composes Button (base / --sm / --icon --xs / --icon --sm), Toggle (`toggle--xs`,
+ * label-less) and RoomCard (one per plan, in the Room-Selector-Bar slot). Needs
+ * Toggle.js for the switch to flip; everything else is presentational.
+ *
+ * Figma names this component "Header". It is filed as SeatingHeader because
+ * src/patterns/Header is a different, unrelated component (the AI-Chat header).
+ *
+ * The Type axis is DATA, not CSS: `No Plans` is the event bar on its own, `Has Plans`
+ * adds the room selector and the toolbar. Which one renders is markup the caller
+ * supplies, so there are no Type modifiers — the fifth component in this module where
+ * that holds (see RoomCard, TableCard, TableDetail, Unassigned).
+ *
+ * WIDTH: Figma draws 1552px, unbound and matching no token — just the frame it drew.
+ * Fluid at the designer's direction 2026-08-26, the same call taken for AttendeeCard,
+ * TableCard and TableListing.
+ */
+
+.seating-header {
+  /* Self-container (2026-08-27). This pattern spans the page column, so its own inline size
+   * IS the available width — the correct signal. Replaces two viewport media queries that
+   * could not see the docked SidebarMenu or the ActionsMenu rail narrowing the column: at a
+   * 2239px viewport with the menu docked the column was 820px and neither query fired, so the
+   * toolbar stayed in its widest form and its text ran straight over the toggle. */
+  container-type: inline-size;
+  container-name: seating-header;
+  display: flex;
+  flex-direction: column;
+  inline-size: 100%;
+  /* NEVER shrink. A header's height is its content, and crushing it destroys information rather
+   * than merely tightening it.
+   *
+   * Found 2026-08-27: inside a height-constrained flex column (`.cc-control__page`) this
+   * collapsed to **2px** — no room plan, no toolbar, the action buttons sliced in half. The
+   * mechanism is worth remembering, because the usual protection silently does not apply here:
+   * a flex item's automatic minimum size (`min-height: auto`) only protects items whose
+   * `overflow` is `visible`. This root USED TO set `overflow: hidden` — which made its automatic
+   * minimum ZERO, so it collapsed to nothing and clipped rather than refusing to shrink, and any
+   * shortfall a sibling caused came entirely out of this element.
+   *
+   * That clip was removed on 2026-08-28 (see below), so the automatic minimum would now protect
+   * it. `flex-shrink: 0` is KEPT anyway: it states the intent directly rather than relying on a
+   * default that a future `overflow` change would silently switch off again — which is exactly how
+   * the 2px collapse happened. With it, overflow goes to the scroll container instead, the correct
+   * failure mode: content stays visible and reachable. */
+  flex-shrink: 0;
+  border: 1px solid var(--ai-border-secondary);
+  border-radius: var(--ai-radius-lg);
+  background-color: var(--ai-surface-primary);
+  /* NO `overflow: hidden` here (removed 2026-08-28). It used to clip the whole component, which
+   * made the toolbar's overflow menu impossible: Figma draws that panel 48px BELOW the header's
+   * bottom edge (3585:110311 — Toolbar y=224..288 in a 288-tall symbol, Dropdowns y=272..336), and
+   * an absolutely-positioned panel inside a clipped ancestor simply disappears.
+   *
+   * The clip was only ever protecting the radius. What actually needs clipping is the
+   * room-selector carousel, and `.seating-header__rooms` already does that itself with
+   * `overflow-x: auto`. So the corners are now held by the first and last rows carrying their own
+   * radii instead — see the two rules below. */
+}
+
+/* The rounded corners, previously a side effect of the root's `overflow: hidden`. Both the event
+ * bar and the toolbar paint `--ai-surface-primary`, so without this they square off the corners —
+ * the exact failure mode recorded against SystemRole's minimised mode. Applied to whichever rows
+ * happen to be first and last, because Type=No Plans has no toolbar and the bar is then both. */
+.seating-header > :first-child,
+/* …and through the carousel wrapper, whose own box paints nothing: the rail inside it is what
+ * carries the background, so a wrapper-only radius would leave a square white corner poking out
+ * from under a rounded parent — the SystemRole corner-bleed failure again. Only reachable in the
+ * demo's carousel-only section, where the rail IS first and last; in the real header the bar is
+ * first and the toolbar last, so these two selectors are inert there. */
+.seating-header > :first-child > .seating-header__rooms {
+  border-start-start-radius: var(--ai-radius-lg);
+  border-start-end-radius: var(--ai-radius-lg);
+}
+
+/* Bottom corners, plus the bottom-rule suppression — one rule, since both target the last row.
+ *
+ * On the rule: only Event-Info-Bar and Room-Selector-Bar carry a bottom border in Figma; Toolbar
+ * has none. That works out on Type=Has Plans, where Toolbar is last — but on Type=No Plans the
+ * event bar IS last, and its rule would sit directly on the root's own border, reading as a 2px
+ * line at the rounded bottom edge. */
+.seating-header > :last-child,
+.seating-header > :last-child > .seating-header__rooms {
+  border-end-start-radius: var(--ai-radius-lg);
+  border-end-end-radius: var(--ai-radius-lg);
+  border-block-end: 0;
+}
+
+/* ── Event-Info-Bar ─────────────────────────────────────────────────────────
+ * Desktop is one row: the event details on the left, the global actions hard right. */
+.seating-header__bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  /* 32px minimum between the details block and the global actions (designer, 2026-08-26).
+   * Figma needs no gap here because its details block is a fixed 900px, which leaves a
+   * wide hole next to the buttons; with the block fluid (`flex: 1 0 0`) this gap is what
+   * replaces that fixed width and stops a long event title reaching the buttons.
+   * The mobile rule below overrides it with --ai-spacing-4 for the stacked layout. */
+  gap: var(--ai-spacing-7);
+  padding: var(--ai-spacing-6);
+  border-block-end: 1px solid var(--ai-border-secondary);
+}
+
+/* Figma pins this at w-[900px], unbound and matching no --ai-size-* token (the set binds
+ * only --ai-size-4 240 and --ai-size-5 280). Fluid at the designer's direction
+ * 2026-08-26: the bar is justify-between, so this is simply its left column. */
+.seating-header__details {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--ai-spacing-3);
+  flex: 1 0 0;
+  min-inline-size: 0;
+}
+
+.seating-header__title-row {
+  display: flex;
+  align-items: center;
+  gap: var(--ai-spacing-4);
+  max-inline-size: 100%;
+}
+
+/* The swap button must not absorb any of the squeeze — the TITLE is what gives way, which
+ * is what its ellipsis is for.
+ *
+ * Without this the button is an ordinary shrinkable flex item, and because `.btn--icon`
+ * sets `width` rather than a minimum, a long event title crushed it well below its 32px.
+ * Figma has this instance at a fixed 32x24. Every other button group in this pattern
+ * (`__actions`, `__buttons`, `__more`) already carries flex-shrink: 0 on its container;
+ * this one sits directly in a flex row, so it needs its own. */
+.seating-header__title-row > .btn {
+  flex-shrink: 0;
+}
+
+/* `flex: 0 1 auto` — must NOT grow, or the swap button would be pushed to the far right
+ * of the (now fluid) details column instead of sitting beside the title as Figma draws
+ * it. It may shrink, which is what makes the ellipsis reachable: Figma marks the title
+ * shrink-0 WITH ellipsis rules, an inert pair that only made sense against a fixed
+ * 900px parent. Honouring the ellipsis is the intent. */
+.seating-header__title {
+  flex: 0 1 auto;
+  min-inline-size: 0;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--ai-font-title);
+  font-size: var(--ai-font-fixed-xl);
+  font-weight: var(--ai-font-bold);
+  line-height: normal;
+  color: var(--ai-text-primary);
+}
+
+/* The event facts: date, headcount, venue. A real <ul>, so it is a list to a screen
+ * reader too.
+ *
+ * Figma wraps these in a single-child `Item` frame carrying its own --ai-spacing-5 gap;
+ * with one child that gap does nothing, so the wrapper is dropped. (Desktop only —
+ * mobile has no such wrapper, which is what confirms it is noise.)
+ *
+ * flex-wrap plus the split gap is Figma's MOBILE rule, applied at both breakpoints: the
+ * column gap is --ai-spacing-4 on both, and desktop never reaches its own wrap point, so
+ * the single rule reproduces both variants and degrades instead of overflowing between. */
+.seating-header__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  /* 4px (designer, 2026-08-28), tightening the wrapped rows. Was `--ai-spacing-2` (6px).
+   * FLAGGED: the mobile frame 3515:213426 still draws 6px here — its three meta items sit at
+   * y=0 and y=22 at 16px tall, so 22 - 16 = 6 — so Figma and code now differ by 2px on this one
+   * property until the frame is updated. Applied on the designer's explicit instruction, which
+   * the build-component rules accept as a source alongside a Figma binding; recorded so the next
+   * audit reads this as an intentional divergence rather than drift to be "corrected" back. */
+  row-gap: var(--ai-spacing-1);
+  column-gap: var(--ai-spacing-4);
+  inline-size: 100%;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.seating-header__meta-item {
+  display: flex;
+  align-items: center;
+  gap: var(--ai-spacing-2);
+  flex-shrink: 0;
+  font-family: var(--ai-font-title);
+  font-size: var(--ai-font-fixed-xs);
+  font-weight: var(--ai-font-medium);
+  line-height: var(--ai-leading-xs);
+  color: var(--ai-text-contrast);
+  white-space: nowrap;
+}
+
+.seating-header__meta-item [data-lucide],
+.seating-header__meta-item svg {
+  inline-size: var(--ai-icon-size-sm);
+  block-size: var(--ai-icon-size-sm);
+  flex-shrink: 0;
+  color: var(--ai-icon-contrast);
+}
+
+.seating-header__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--ai-spacing-3);
+  flex-shrink: 0;
+}
+
+/* ── Carousel wrapper ───────────────────────────────────────────────────────
+ * Exists ONLY to hold the arrows next to the rail rather than inside it. Two independent
+ * reasons, either of which alone would force it:
+ *
+ *   1. The rail is MASKED (see the edge fade below). Anything inside it is masked too, so an
+ *      arrow sitting at the edge — exactly where an arrow goes — would be faded by the very
+ *      affordance it accompanies.
+ *   2. `seating-app.js` does `rooms.innerHTML = plans.map(…)` on every render, so an arrow
+ *      inside the rail would be destroyed the first time a plan changed. That is this module's
+ *      most repeated bug (see `feedback_renderer_drops_component_markup`), and here the
+ *      structure rules it out rather than relying on anyone remembering.
+ *
+ * It adds a DOM level, so the two radius rules above were extended to reach through it. */
+.seating-header__carousel {
+  position: relative;
+}
+
+/* ── Room-Selector-Bar ──────────────────────────────────────────────────────
+ * A Figma slot, so its contents are the caller's — one RoomCard per plan.
+ *
+ * overflow-x: Figma's own mobile variant overflows its frame (12 + 240 + 8 + 240 + 12 =
+ * 512 in a 392px frame, with the second card visibly clipped), so more plans than fit is
+ * the drawn, intended state. A scroller is the faithful reading of that; the alternative
+ * would be to invent wrapping Figma does not show. */
+.seating-header__rooms {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--ai-spacing-5);
+  padding-inline: var(--ai-spacing-6);
+  padding-block: var(--ai-spacing-5);
+  border-block-end: 1px solid var(--ai-border-secondary);
+  background-color: var(--ai-surface-primary);
+  overflow-x: auto;
+  /* NO SCROLLBAR — a carousel, driven by touch swipe and (via SeatingHeader.js) mouse drag
+   * (designer, 2026-08-26). This is closer to Figma than the thin bar it replaces: Figma
+   * draws the second card simply clipped, with no scrollbar anywhere.
+   *
+   * Deliberately NOT the treatment TableDetail's seat list has. That is a long vertical
+   * list, where the bar doubles as a position indicator worth keeping; a two-or-three-card
+   * horizontal carousel is a different interaction.
+   *
+   * Scrolling itself is untouched — only the bar is hidden — so touch swipe, trackpad,
+   * shift-wheel and Tab-to-the-next-card all keep working. */
+  scrollbar-width: none; /* Firefox */
+  -ms-overflow-style: none; /* legacy Edge */
+  /* Keeps a swipe past the end from chaining to the page — on iOS and in Chrome that
+   * otherwise triggers back-navigation. */
+  overscroll-behavior-x: contain;
+
+  /* ── EDGE FADE — the overflow affordance (designer, 2026-09-11) ──────────────────────────
+   *
+   * With the scrollbar hidden above, the only remaining signal that this rail scrolls was
+   * `cursor: grab`, which is hover-only AND mouse-only: a touch user got nothing at all, and
+   * nobody got anything before moving a pointer onto the rail. The fade is the input-agnostic
+   * half of that pair — always visible, on whichever side actually has more content.
+   *
+   * A MASK, NOT A GRADIENT PAINT. Two reasons, the first being the one that matters:
+   *   1. `mask-image` works in the ALPHA channel, so `black` / `transparent` below are mask
+   *      coverage values, not design colours. There is no paint value to tokenise, so the
+   *      gradient-token rule (CLAUDE.md §8) has nothing to bite on. The obvious alternative —
+   *      an overlay of `linear-gradient(transparent, var(--ai-surface-primary))` — would
+   *      instead hardcode a relationship to this row's background, and break silently the day
+   *      the header bg changes or the row is themed.
+   *   2. It fades the CARDS rather than painting a rectangle over them, so it stays correct
+   *      across `border-block-end` and needs no stacking-order work.
+   *
+   * NOT IN FIGMA, and verified so rather than assumed (2026-09-11): a screenshot of the mobile
+   * variant `3484:186300` cuts "Overflow Annex" with a HARD edge, and `get_variable_defs` on
+   * `3474:90518` returns no gradient variable at all. A deliberate divergence — see the
+   * divergence table in the figma-notes.
+   *
+   * WIDTH tracks this breakpoint's own `padding-inline`, so the fade spans exactly the gutter
+   * and a card is never dimmed while fully inside the content box. Figma specifies no width
+   * (it draws no fade), which makes this the one value here with no Figma authority — change
+   * `--fade-w` alone to make it softer or tighter. */
+  --fade-w: var(--ai-spacing-6); /* = padding-inline above; overridden with it at ≤767 */
+  --fade-start: 0px;
+  --fade-end: 0px;
+  --fade-mask: linear-gradient(
+    to right,
+    transparent 0,
+    black var(--fade-start),
+    black calc(100% - var(--fade-end)),
+    transparent 100%
+  );
+  -webkit-mask-image: var(--fade-mask);
+  mask-image: var(--fade-mask);
+}
+
+.seating-header__rooms::-webkit-scrollbar {
+  display: none; /* Safari + Chrome */
+}
+
+/* Only advertise dragging when there is somewhere to drag to. SeatingHeader.js adds
+ * `is-scrollable` when the content overflows and keeps it in sync on resize, so a bar with
+ * one plan in it does not offer a grab cursor that does nothing. */
+.seating-header__rooms.is-scrollable {
+  cursor: grab;
+}
+
+.seating-header__rooms.is-dragging {
+  cursor: grabbing;
+  /* Without this a drag across the cards selects their text instead. */
+  user-select: none;
+}
+
+/* Only the side that genuinely has more content fades — a fade on both edges of a rail
+ * scrolled to its end would claim content that is not there. `SeatingHeader.js` toggles these
+ * from `scrollLeft`, so: at rest, a fade on the right only; scrolled to the end, on the left
+ * only; mid-rail, both; and with a single plan in the rail, neither.
+ *
+ * Both default to `0px` on the rule above rather than being unset, so the mask is always a
+ * valid four-stop gradient and the un-faded state costs no separate declaration. */
+.seating-header__rooms.has-fade-start {
+  --fade-start: var(--fade-w);
+}
+
+.seating-header__rooms.has-fade-end {
+  --fade-end: var(--fade-w);
+}
+
+/* ── Carousel arrows (designer, 2026-09-11) ─────────────────────────────────────────────────
+ *
+ * The pointer-only half of the affordance pair the fade opened. Mouse drag works but is
+ * undiscoverable — nothing tells you the rail can be dragged until you happen to press on it —
+ * so these give a plain click target. **Desktop only, as asked**: touch swipes natively and an
+ * arrow there is redundant.
+ *
+ * NOT IN FIGMA. `get_metadata` on the set `3474:90519` returns six variants and none of them
+ * contains a nav control of any kind, so this is invented rather than transcribed — the same
+ * status as the fade, and recorded in the same divergence table. Composition keeps that honest:
+ * the visual IS the Button component at an existing size (`btn--secondary btn--icon btn--sm`,
+ * 32x32 via `--ai-spacing-7`) with Lucide chevrons, so no new paint value, radius or size is
+ * introduced here — only position.
+ *
+ * NO NEW STATE. The arrows are driven by the FADE's own classes, because `has-fade-start` /
+ * `has-fade-end` already mean precisely "there is more content this way", which is exactly when
+ * each arrow should exist. That makes it impossible for an arrow and a fade to disagree, and it
+ * is why this needed no JS beyond the click handlers. It also gives the ends-behaviour for free:
+ * at the start there is no prev arrow at all, matching SourcesCarousel, whose `[disabled]` arrows
+ * are likewise `display: none` rather than greyed.
+ *
+ * The selector requires the arrows to come AFTER the rail in source order — CSS has no preceding
+ * sibling. They are absolutely positioned, so source order is invisible; see the note in the HTML. */
+.seating-header__arrow {
+  position: absolute;
+  /* Centred with a transform rather than `inset-block: 0` + `margin-block: auto`. The auto-margin
+   * technique needs a DEFINITE height to centre against, and Button gives `btn--icon.btn--sm` a
+   * `min-height` with no height — so the box stretched to fill the whole rail and the arrows
+   * rendered as tall pills instead of 32px squares (caught by looking at a screenshot; every
+   * class-level probe passed). Restating a height here would duplicate Button's own size token
+   * and silently desync the day it changes, so the transform is the right fix: it centres at
+   * whatever height Button resolves to.
+   *
+   * Centres against the wrapper, whose box includes the rail's 1px bottom border, so the arrow
+   * sits half a pixel above the cards' own centre — below the threshold of anything, and the
+   * alternative hardcodes a border width into a position. */
+  inset-block-start: 50%;
+  transform: translateY(-50%);
+  z-index: 1;
+  /* Hidden by default at EVERY width: the show rules below are additive and desktop-only, so a
+   * narrow container can never reveal these however the fade classes land. */
+  display: none;
+}
+
+/* Inset by `--ai-spacing-4` rather than sitting flush (designer, 2026-09-11: "too tight to the
+ * edge"). It was at 0, hard against the rail's own edge. */
+.seating-header__arrow--prev {
+  inset-inline-start: var(--ai-spacing-4);
+}
+
+.seating-header__arrow--next {
+  inset-inline-end: var(--ai-spacing-4);
+}
+
+/* FILL + LIFT (designer, 2026-09-11, revised). Button's secondary variant is TRANSPARENT —
+ * `--ai-btn-secondary-bg` is `rgba(0,0,0,0)` in all three modes. Correct on a plain surface, wrong
+ * for a button floating over room cards: a card's "24 seats free" read straight through it.
+ *
+ * ONLY THE DEFAULT is overridden. An earlier pass shifted the whole state ladder down a rung
+ * (default took the hover fill, hover took pressed), which fixed the transparency but cost the
+ * press step — `:active` already paints `bg-pressed`, so pressed and hover collapsed to one tone.
+ * Reverted: hover and active now fall through to Button's own `--ai-btn-secondary-bg-hover` /
+ * `-bg-pressed` untouched, so the full ladder is intact and the two states read normally again.
+ *
+ * 90% of the page surface rather than a flat token, so the card beneath stays faintly legible
+ * instead of being punched out — the button reads as glass over the carousel rather than a patch
+ * cut out of it. `color-mix` rather than a hand-written rgba: the alpha has to apply to
+ * `--ai-surface-primary`, which is #ffffff in light and CC but #1e293b in dark, so a literal rgba
+ * would hardcode one theme's colour and break the other. It is also the established way this repo
+ * derives colours (ChatMain's scrollbar, Modal's brand mix). Opacity itself is a structural value,
+ * not a design token — see the skill's own note that `opacity` needs no token.
+ *
+ * The shadow is what separates it from the card at the 10% where they show through each other. */
+.seating-header__arrow.btn--secondary {
+  background-color: color-mix(in srgb, var(--ai-surface-primary) 90%, transparent);
+  box-shadow: var(--ai-shadow-base);
+}
+
+@container seating-header (min-width: 1024px) {
+  /* "Desktop" in this component's own vocabulary — it already bands at 767 and 1023, and 1024 is
+   * the boundary the Seating Planner shell uses too. Deliberately a CONTAINER query, so a docked
+   * SidebarMenu narrowing the column withdraws the arrows exactly as it collapses everything
+   * else; a viewport query would leave them on a 700px column. */
+  .seating-header__rooms.has-fade-start ~ .seating-header__arrow--prev,
+  .seating-header__rooms.has-fade-end ~ .seating-header__arrow--next {
+    display: inline-flex;
+  }
+
+  /* The fade widens to sit BEHIND the arrow (designer, 2026-09-11) — the button is 32px at a 12px
+   * inset, so it reaches 44px in from the rail edge, and `--ai-spacing-9` (48) is the token that
+   * covers it. Scoped to this block deliberately: the wider fade exists to carry the button, so it
+   * appears exactly where the button does and the 768–1023 band keeps the gutter-width fade.
+   *
+   * This BREAKS the padding-matching that used to protect the keyboard path. A fade equal to
+   * `padding-inline` could never dim a Tab-focused card, because the browser scrolls focus flush to
+   * the padding edge (24) — but at 48 the fade now reaches past it, and a focused card would land
+   * half-dimmed. `scroll-padding-inline` is the documented fix and is what makes the widening safe:
+   * it tells focus-scroll to stop `--fade-w` in, so the card clears the fade entirely. Without this
+   * line, widening the fade is a keyboard regression. */
+  .seating-header__rooms {
+    --fade-w: var(--ai-spacing-9);
+    scroll-padding-inline: var(--fade-w);
+  }
+}
+
+/* Figma draws the desktop card at 290px, which has no token; --ai-size-5 (280px) is the
+ * one that exists and is the min-width RoomCard itself binds — the identical call already
+ * taken inside RoomCard, so the two agree. flex-basis is needed because RoomCard's own
+ * `inline-size: 100%` would otherwise resolve against the whole bar. */
+.seating-header__rooms > .room-card {
+  flex: 0 0 var(--ai-size-5);
+}
+
+/* ── Toolbar ────────────────────────────────────────────────────────────────
+ * The active room, the unassigned switch, and the table actions. */
+.seating-header__toolbar {
+  display: flex;
+  align-items: center;
+  /* 8px (designer, 2026-08-28), was --ai-spacing-5 (16px). This is the gap between the actions
+   * group and the kebab. It now applies at EVERY width — see the note on the redundant ≤767
+   * override further down. */
+  gap: var(--ai-spacing-3);
+  /* Asymmetric inline padding (designer, 2026-08-28): 24px leading, 12px trailing. The kebab is
+   * an optical edge rather than a boxed control, so it sits closer to the border than the room
+   * name does.
+   *
+   * ORDER IS LOAD-BEARING. `padding-inline-end` must stay AFTER `padding-inline`, which sets both
+   * sides; reversed, the shorthand would reset the end back to 24px. It reads like a redundant
+   * pair and is not. (It happens to be alphabetical too, so a property sorter leaves it alone.) */
+  padding-inline: var(--ai-spacing-6);
+  padding-block: var(--ai-spacing-5);
+  padding-inline-end: var(--ai-spacing-4);
+  background-color: var(--ai-surface-primary);
+}
+
+.seating-header__toolbar-actions {
+  display: flex;
+  align-items: center;
+  /* 8px (designer, 2026-08-28), was --ai-spacing-5 (16px). This is the gap between the room
+   * block, the unassigned switch, the divider and the button cluster.
+   * FLAGGED: the mobile frame 3515:213426 still draws 16px here — inside its 302px-wide
+   * Toolbar-Actions, the room block occupies x=0..190 and the button cluster starts at x=206, so
+   * 206 - 190 = 16. Figma and code now differ on this property until the frame is updated. Same
+   * situation as the meta row-gap and the bar gap recorded above; applied on explicit
+   * instruction and noted so a later audit reads it as intent rather than drift. */
+  gap: var(--ai-spacing-3);
+  flex: 1 0 0;
+  min-inline-size: 0;
+}
+
+/* Figma splits the room label and the toggle group as two equal flex-1 columns, exactly
+ * as TableListing's toolbar does — 537px each in a 1468px row. */
+.seating-header__room {
+  display: flex;
+  align-items: center;
+  /* Figma leaves this an unbound raw 8px; --ai-spacing-3 is exactly 8px, so binding it
+   * is visually a no-op. Flagged in figma-notes. */
+  gap: var(--ai-spacing-3);
+  flex: 1 0 0;
+  min-inline-size: 0;
+}
+
+.seating-header__room-name {
+  margin: 0;
+  font-family: var(--ai-font-title);
+  font-size: var(--ai-font-fixed-md);
+  font-weight: var(--ai-font-bold);
+  line-height: normal;
+  color: var(--ai-text-primary);
+  white-space: nowrap;
+  /* `nowrap` with no ellipsis and no zero min-size meant this text could not shrink and simply
+   * spilled out of its flex parent — measured 2026-08-27 at a 130px box holding 243px of text,
+   * running straight over the Show-unassigned toggle. The container query below now stacks this
+   * row far earlier, but the guard stays: a long enough room name must truncate, not escape.
+   * Intrinsic, so it holds at every width rather than only below a breakpoint. */
+  min-inline-size: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.seating-header__room-count {
+  margin: 0;
+  font-family: var(--ai-font-title);
+  font-size: var(--ai-font-fixed-xs);
+  font-weight: var(--ai-font-medium);
+  line-height: normal;
+  color: var(--ai-text-contrast);
+  white-space: nowrap;
+  /* Same guard as the name. The count is short and parenthetical, so it resists shrinking
+   * first — the name is what should give way. */
+  flex-shrink: 0;
+  min-inline-size: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Right-aligned within its own flex-1 column, which is what puts it hard against the
+ * divider — the same arrangement as TableListing's filter group. */
+.seating-header__toggle-group {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--ai-spacing-3);
+  flex: 1 0 0;
+  min-inline-size: 0;
+}
+
+.seating-header__toggle-label {
+  font-family: var(--ai-font-title);
+  font-size: var(--ai-font-fixed-xxs);
+  font-weight: var(--ai-font-medium);
+  line-height: normal;
+  color: var(--ai-text-contrast);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+/* A 16px vertical hairline. Figma draws it as a rotated `line` node whose stroke is
+ * hidden inside an SVG asset; it resolves to --ai-border-secondary via get_variable_defs
+ * on 3474:90290 — the same element, and the same resolution, as TableListing's divider.
+ * 1px is the border-width exception. */
+.seating-header__divider {
+  flex-shrink: 0;
+  inline-size: 1px;
+  block-size: var(--ai-spacing-5);
+  background-color: var(--ai-border-secondary);
+}
+
+.seating-header__buttons {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--ai-spacing-3);
+  flex-shrink: 0;
+}
+
+/* The overflow kebab. Figma draws a bare 20px icon layer with no button around it; built
+ * as a real <button> at the designer's direction 2026-08-26, since a bare <i> is neither
+ * focusable nor keyboard-operable (CLAUDE.md §9). The ::after stretches the hit area to
+ * the 44x44 minimum without disturbing the 20px icon Figma draws — the same stretched-
+ * trigger pattern RoomCard uses for its card select. */
+/* ── Toolbar overflow menu ──────────────────────────────────────────────────
+ * Composes Dropdown. Only the bits Dropdown cannot know are set here: that the root must not
+ * shrink in the toolbar row, and that the panel hangs off the RIGHT edge because the trigger sits
+ * at the end of the row. Dropdown's own panel is `left: 0`, which would push it off-screen. */
+.seating-header__menu {
+  flex-shrink: 0;
+}
+
+.seating-header__menu .dropdown__panel {
+  inset-inline-start: auto;
+  inset-inline-end: 0;
+  /* Size=xs panel, matching the Export menu (designer, 2026-09-11) — and matching Figma, which
+   * had it this way all along. `3585:110482` draws this menu as a 176-wide instance holding a
+   * 160 List (--ai-size-2) at 8px padding, with 32px DropdownItem rows; the code had it at
+   * Dropdown's own 240/12 default with 40px rows. So this is a correction, not a restyle.
+   *
+   * The rows carry `dropdown-item--xs` in the markup rather than being forced from here: xs is a
+   * formal DropdownItem variant (Figma `3393:29188`), so the row should say which size it is. */
+  min-width: var(--ai-size-2);    /* 160 */
+  padding: var(--ai-spacing-3);   /* 8 */
+}
+
+/* CONTEXTUAL OVERRIDE, and the SAME one the Export menu already carries — `3585:110482` binds
+ * --ai-icon-secondary on these row icons where DropdownItem's own xs variant binds
+ * --ai-icon-primary (`3393:29188`). Both come from Figma.
+ *
+ * Applied here rather than re-raised because the decision was already taken for this screen on
+ * 2026-09-09 (Case B: scope it, flag it, do not give one row component a third icon colour). It
+ * is recorded again in SeatingPlanner.figma-notes.md so the two menus are not read as one
+ * override and one accident. */
+.seating-header__menu .dropdown-item [data-lucide]:not(.dropdown-item__check) {
+  color: var(--ai-icon-secondary);
+}
+
+/* The LABEL, on the same terms (designer, 2026-09-11). `3585:110482` binds --ai-text-secondary
+ * where DropdownItem's xs variant binds --ai-text-primary (`3393:29188`).
+ *
+ * Safe as one declaration: DropdownItem's hover only moves `background-color` for a normal row
+ * — `color` changes on hover for `--warning` rows only, which these are not — so there is no
+ * state further down the cascade to re-assert the primary. It inherits into the label span and
+ * its `::before` width-reservation pseudo, so neither needs naming.
+ *
+ * `.seating-header__menu .dropdown-item` is (0,2,0) against the component's (0,1,0) base, so the
+ * override wins without !important and without touching DropdownItem. */
+.seating-header__menu .dropdown-item {
+  color: var(--ai-text-secondary);
+}
+
+/* Room Layout lives in the toolbar above 1200 and in this menu below it, so exactly one of the
+ * two is visible at any width. Default state is the >=1200 one: button shown, menu item hidden. */
+.seating-header__menu-item--layout {
+  display: none;
+}
+
+/* ── Minimise header ────────────────────────────────────────────────────────
+ * DESKTOP ONLY. Below 1023 the header does not pin at all — Figma's mobile frames scroll it away
+ * outright and the page is the scroller — so there is no minimised state for this to hold, and an
+ * item that does nothing is worse than no item. The threshold is the one the whole screen changes
+ * mode at, not a new one.
+ *
+ * `cs-page`, not `@media`: the docked SidebarMenu shrinks the content column with no window resize
+ * at all, so a viewport query would leave this offering a state the layout has already left
+ * (CLAUDE.md §4a). The menu is a child of the page, so it may query that container freely. */
+@container cs-page (max-width: 1023px) {
+  .seating-header__menu-item--minimise {
+    display: none;
+  }
+}
+
+/* One row, two labels and two glyphs, swapped by CSS rather than rewritten by JS. Lucide replaces
+ * `<i data-lucide>` with an `<svg>` at init, so changing the icon in script means rebuilding the
+ * node and re-running `createIcons()` — both states being present costs one hidden span and one
+ * hidden svg, and cannot fall out of step. The state class sits on the PAGE, which is why these
+ * are written as descendant rules rather than on the item itself. */
+.seating-header__menu-glyph--max {
+  display: none;
+}
+
+.is-header-minimised .seating-header__menu-glyph--min {
+  display: none;
+}
+
+.is-header-minimised .seating-header__menu-glyph--max {
+  display: block;
+}
+
+/* The LABELS need `span[data-text]` in the selector and the component's own `inline-flex` as the
+ * shown value — both measured, not guessed. DropdownItem.css sets `.dropdown-item span[data-text]
+ * { display: inline-flex }` for the width-reservation `::before`, which is (0,2,1); a plain
+ * `.is-header-minimised .seating-header__menu-word--min` is (0,2,0) and loses to it, so the first
+ * version of this swapped the icon and left both labels on screen — the row read "Minimise header
+ * Expand header". Matching the component's own shape outranks it without `!important`, and
+ * re-stating `inline-flex` keeps the reservation working rather than collapsing the cell to
+ * `inline`. */
+.dropdown-item span[data-text].seating-header__menu-word--max {
+  display: none;
+}
+
+.is-header-minimised .dropdown-item span[data-text].seating-header__menu-word--min {
+  display: none;
+}
+
+.is-header-minimised .dropdown-item span[data-text].seating-header__menu-word--max {
+  display: inline-flex;
+}
+
+/* `--xs` sizes the leading icon with `[data-lucide]:not(.dropdown-item__check)`, which matches an
+ * `<i>` before Lucide swaps it and the `<svg>` after — so both glyphs are covered without naming
+ * them. Only the layout rules above are needed here. */
+
+.seating-header__more {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  color: var(--ai-icon-secondary);
+}
+
+.seating-header__more::after {
+  content: '';
+  position: absolute;
+  inset-inline-start: 50%;
+  inset-block-start: 50%;
+  /* Touch target. Not design values — no token; these are a11y minimums.
+   *
+   * 36 wide, NOT 44 (2026-08-28). A 44px area centred on this 20px button overhangs 12px each
+   * side, but Figma's gap to the Export button is 8 — so it covered Export's rightmost 4px and
+   * a tap there opened the kebab menu instead. Hit-tested: Export owned only 9 of 10 sampled
+   * pixels, the last one stolen by "More seating actions".
+   *
+   * 36 = 20 + 8 + 8, so it fills the gap on both sides and stops exactly where the neighbour
+   * begins. Still well above WCAG 2.2's AA target-size minimum (2.5.8, 24x24); the 44 figure in
+   * CLAUDE.md §9 is Apple HIG / WCAG 2.5.5 AAA. **Flagged**: this is a deliberate deviation from
+   * that §9 number, taken because the alternative is overlapping a sibling control. Widening
+   * Figma's 8px gap would allow the full 44 — a designer call. Block size stays 44, since there
+   * is vertical room. */
+  inline-size: 36px;
+  block-size: 44px;
+  transform: translate(-50%, -50%);
+}
+
+.seating-header__more [data-lucide],
+.seating-header__more svg {
+  inline-size: var(--ai-icon-size-md);
+  block-size: var(--ai-icon-size-md);
+  flex-shrink: 0;
+}
+
+.seating-header__more:focus-visible {
+  outline: 2px solid var(--ai-surface-brand);
+  outline-offset: 2px;
+  border-radius: var(--ai-radius-sm);
+}
+
+/* ── Device: Mobile ─────────────────────────────────────────────────────────
+ * Figma's Device axis. The event bar becomes three stacked rows, the meta wraps, the
+ * room cards narrow and grow, and the toolbar loses the toggle and the divider entirely.
+ */
+@container seating-header (max-width: 767px) {
+  /* Add Table becomes ICON-ONLY here (Figma updated 2026-08-28, mobile frame 3515:213426).
+   * The buttons group went 128 -> 96 wide — two 32x32 icon buttons plus the 20px kebab — and the
+   * room block took the 16px it freed, 158 -> 190.
+   *
+   * There are now exactly TWO states, matching the two frames Figma draws (desktop 1552, mobile
+   * 402): "Add Table" above 767, icon-only at or below it. The former three-step ladder
+   * ("Add Table" -> "Add" -> icon) was retired on 2026-08-28 — the intermediate "Add" existed to
+   * relieve an overflow in the 768-1023 band that the container queries now handle by reflowing.
+   *
+   * The label is CLIPPED, not removed, so "Add Table" remains the button's accessible name — the
+   * same technique Export already uses below and RoomCard uses for the word "seated". */
+  .seating-header__btn--add .seating-header__btn-label {
+    position: absolute;
+    inline-size: 1px;
+    block-size: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  /* 32x32 — the geometry of `btn--icon btn--sm`, which cannot be added as a class from a
+   * container query. Export gets the identical treatment just below. */
+  .seating-header__btn--add.btn {
+    inline-size: var(--ai-spacing-7);
+    min-block-size: var(--ai-spacing-7);
+    padding: 0;
+  }
+
+  /* ── Moved down from the 1023 block on 2026-08-28 (designer) ──────────────
+   * The toggle, the divider and Export's label all used to compact at 1023. They now hold their
+   * full form down to 767, so the 768-1199 band keeps the complete toolbar and only Room Layout
+   * has left it (into the overflow menu, at 1200). Below 767 everything collapses at once, which
+   * is what Figma's mobile frame 3515:213426 draws: no toggle, and Add and Export as 32px icons.
+   *
+   * This supersedes an earlier instruction that put the toggle's threshold at 1024. The room-name
+   * stacking and its font steps stay in the 1023 block deliberately — narrowing the room block is
+   * what frees the horizontal space these full-width buttons now need in that band. */
+
+  /* Both absent from Figma's mobile variant — not merely rearranged. */
+  .seating-header__toggle-group,
+  .seating-header__divider {
+    display: none;
+  }
+
+  /* EXPORT ONLY. The two buttons wrap DIFFERENT content in the same class, which is why one
+   * selector would produce two effects:
+   *   Add     `Add<span class="__btn-shrink"> Table</span>`  -> clipping leaves the word "Add"
+   *   Export  `<span class="__btn-shrink">Export</span>`     -> clipping leaves nothing, icon-only
+   * Add is handled by clipping its whole `__btn-label` above, so this stays scoped to Export.
+   *
+   * Clipped rather than `display: none`, so "Export" stays in the accessibility tree and the
+   * icon-only button keeps an accessible name. Being out of flow, it contributes no flex gap. */
+  .seating-header__btn--export .seating-header__btn-shrink {
+    position: absolute;
+    inline-size: 1px;
+    block-size: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .seating-header__btn--export.btn {
+    inline-size: var(--ai-spacing-7);
+    min-block-size: var(--ai-spacing-7);
+    padding: 0;
+  }
+
+  /* Figma drops the chevron at mobile too. */
+  .seating-header__btn-chevron {
+    display: none;
+  }
+
+  .seating-header__bar {
+    flex-direction: column;
+    align-items: flex-start;
+    /* 16px (designer, 2026-08-28), up from `--ai-spacing-4`.
+     * FLAGGED: the mobile frame 3515:213426 still draws 12px here — inside its 170px
+     * Event-Info-Bar, Event-Details occupies y=16..110 and Global-Actions starts at y=122, so
+     * 122 - 110 = 12. Figma and code now differ by one step on this property until the frame is
+     * updated. `align-items: flex-start` is safe alongside the column direction only because
+     * `.seating-header__details` below sets `inline-size: 100%` explicitly — without that,
+     * flex-start would shrink-wrap every child once the direction flips. */
+    gap: var(--ai-spacing-5);
+    /* Asymmetric in Figma — 12px inline, 16px block. Not a step-down of the desktop 24.
+     * Both still match the frame: padding-block-start reads y=16 and the bar's own bottom
+     * padding reads 170 - 154 = 16. */
+    padding-inline: var(--ai-spacing-4);
+    padding-block: var(--ai-spacing-5);
+  }
+
+  .seating-header__details {
+    flex: 0 0 auto;
+    inline-size: 100%;
+  }
+
+  .seating-header__title-row {
+    align-items: flex-start;
+    inline-size: 100%;
+  }
+
+  /* Mobile drops the ellipsis and wraps instead: Figma makes the title flex-1 with
+   * word-break, because a phone has no room to truncate a long event name into
+   * uselessness. */
+  .seating-header__title {
+    flex: 1 0 0;
+    font-size: var(--ai-font-fixed-md);
+    overflow: visible;
+    text-overflow: clip;
+    white-space: normal;
+    overflow-wrap: break-word;
+  }
+
+  .seating-header__meta-item {
+    font-size: var(--ai-font-fixed-xxs);
+  }
+
+  /* Figma REVERSES the two global actions on mobile, leading with the primary "New Plan"
+   * where desktop leads with the secondary "Copy Plans". Built as drawn. Worth
+   * confirming it is deliberate rather than a layer-order slip — see figma-notes. */
+  .seating-header__actions > .btn--primary {
+    order: -1;
+  }
+
+  /* Figma also steps these two down from Button's base size (40 tall) to `sm` (32) here.
+   * A size class cannot be added from a media query, so `btn--sm`'s four geometry
+   * properties are replicated — same reason as the export button below. */
+  .seating-header__actions > .btn {
+    min-height: var(--ai-spacing-7);
+    padding: 0 var(--ai-spacing-4);
+    font-size: var(--ai-font-fluid-xxs);
+    border-radius: var(--ai-radius-md);
+  }
+
+  .seating-header__rooms {
+    gap: var(--ai-spacing-3);
+    padding: var(--ai-spacing-4);
+    /* Kept beside the padding deliberately: the fade is sized to the gutter, so the two must
+     * change together or the fade starts dimming cards inside the content box. */
+    --fade-w: var(--ai-spacing-4);
+  }
+
+  /* Figma switches the cards to flex-1 here, so a single plan fills the width while two
+   * or more hold their 240px floor and scroll. That floor is RoomCard's own mobile
+   * min-inline-size (--ai-size-4), so it needs no restating. */
+  .seating-header__rooms > .room-card {
+    flex: 1 0 0;
+    /* CAP (designer, 2026-08-27). `flex: 1 0 0` with no maximum meant a single plan stretched to
+     * whatever the row was — harmless while this block only fired on a phone, but it now fires on
+     * container width, so a squeezed desktop column could produce one 676px-wide plan chip.
+     * --ai-size-6 (320) sits just above Figma's mobile card (302), so a real phone still fills the
+     * row exactly as drawn and the cap only engages once the row is wider than the design ever
+     * intended. Flagged: if plans should never exceed their 280px desktop pin, this becomes
+     * --ai-size-5 — one token. */
+    max-inline-size: var(--ai-size-6);
+  }
+
+  /* The toolbar's PADDING moves with its siblings, so all three regions share one inline
+   * padding at any width. Everything else about the toolbar switches at 1024px instead —
+   * see the block below.
+   *
+   * The gap USED to be overridden here to 8px, scoped to this block so the tablet band kept
+   * Figma's 16px. That override was removed on 2026-08-28 when the designer took the base rule
+   * down to `--ai-spacing-3` — it became a no-op restating the inherited value, and the comment
+   * explaining it had become false, since 8px now applies at every width including tablet.
+   *
+   * What remains is real: `padding` collapses the base rule's asymmetric 24/12 inline and 16
+   * block into a flat 12px on all four sides. Confirmed on the mobile frame 3515:213426, where
+   * the 326px-wide Toolbar holds a 302px Toolbar-Actions at x=12 — 12px either side. */
+  .seating-header__toolbar {
+    padding: var(--ai-spacing-4);
+  }
+}
+
+/* ── Toolbar: stays compact until 1024px ────────────────────────────────────
+ * The toolbar carries far more than the bars above it — room name, unassigned count, the
+ * switch, a divider, three buttons and the kebab — so it runs out of room long before the
+ * event bar does. It therefore keeps its compact form all the way up to 1023px (designer,
+ * 2026-08-26), where everything else reverts to the desktop layout at 768px.
+ *
+ * 1024 is not an invented number: it is the Seating Planner shell's own layout boundary —
+ * the prototype's `SeatingPlannerShell.css` switches to the worklist at
+ * `max-width: 1023px` — so the DS pattern now changes shape at the same width as the app
+ * it belongs to.
+ *
+ * The toolbar's own `padding` is deliberately NOT in here. It sits in the 767px block
+ * above, so between 768 and 1023 the toolbar's content still lines up with the event
+ * bar's; moving it here would indent the toolbar 12px against the bar's 24px, which reads
+ * as a misalignment defect rather than a compact layout. Flagged in figma-notes — say the
+ * word and it moves.
+ */
+@container seating-header (max-width: 1023px) {
+  /* ── Room Layout moves into the overflow menu below 1024 ──────────────────
+   * Designer, 2026-08-28. From the two menu frames:
+   *   Type=Menu >1200 (3585:110311) — Management-Buttons holds THREE buttons (118 Room Layout,
+   *                                   101 Add, 111 Export); the menu has 1 item, Table Types
+   *   Type=Menu <1024 (3585:110436) — TWO buttons (101, 111); the menu grows 176x64 -> 176x96,
+   *                                   i.e. one 32px row taller, which is Room Layout arriving
+   *
+   * The threshold is 1024, per the `Menu <1024` variant NAME. Note that frame is DRAWN at 1100,
+   * which is why an earlier pass read it as "the menu state persists up to 1200" and put the
+   * breakpoint at 1199. The name is the spec; the frame width is just where it was drawn.
+   *
+   * CSS cannot move a node, so the toolbar button and the menu item are two copies of one action
+   * whose visibility swaps here. Anything wiring Room Layout must bind BOTH.
+   *
+   * This shares the 1023 block rather than having its own: with the toolbar compaction moved down
+   * to 767, Room Layout is now the only thing that changes at this width, so a separate breakpoint
+   * would have been one more number to keep in step for no gain. */
+  .seating-header__btn--layout {
+    display: none;
+  }
+
+  .seating-header__menu-item--layout {
+    display: block;
+  }
+
+  /* The room label and its count stack. The 2px gap is a designer call 2026-08-26, not a
+   * Figma value — Figma's mobile variant binds --ai-spacing-1 (4px). Same tightening taken
+   * on TableDetail's legend row gap, and for the same reason: two lines of stacked text
+   * read as one block at 2px and as two separate things at 4px. */
+  .seating-header__room {
+    flex-direction: column;
+    /* THE OVERLAP FIX (2026-08-28). `flex-start` was correct-looking and wrong: in a COLUMN flex
+     * container, cross-axis alignment governs WIDTH, and anything other than `stretch`
+     * shrink-wraps each child to its own content. So the room name held a fixed 111px while its
+     * parent shrank, escaping the box by up to 72px and painting straight over the buttons.
+     *
+     * `overflow: hidden` + `text-overflow: ellipsis` on the name were already present and could
+     * never fire — a shrink-wrapped box is never narrower than its own text. `stretch` gives the
+     * children the container's width, so they finally clip. Measured at a 260px column:
+     * name 111 -> 39, escape +72 -> none, 56px overlap -> 16px of clearance.
+     *
+     * Visually identical to `flex-start` here, because the text is left-aligned either way.
+     *
+     * Worth generalising: whenever a rule flips `flex-direction` to column, re-check
+     * `align-items` — a value that only described alignment in the row layout silently becomes a
+     * width policy, and it is the reason a layout OVERLAPS instead of reflowing. */
+    align-items: stretch;
+    justify-content: center;
+    gap: var(--ai-spacing-0-5);
+  }
+
+  .seating-header__room-name {
+    font-size: var(--ai-font-fixed-sm);
+  }
+
+  .seating-header__room-count {
+    font-size: var(--ai-font-fixed-xxs);
+  }
+
+  .seating-header__buttons {
+    gap: var(--ai-spacing-2);
+  }
+
+  /* The compact toolbar keeps two buttons and turns "Export" icon-only. "Add Table" KEEPS ITS
+   * FULL LABEL here as of 2026-08-28 — see the export-scoped clip below. "Room Layout" is already
+   * gone by this width: it leaves the toolbar at 1199 and moves into the overflow menu, in the
+   * block ABOVE this one. Those are CONTENT changes across Figma's Device axis, so they are done
+   * here rather than by shipping two markups. */
+
+}
